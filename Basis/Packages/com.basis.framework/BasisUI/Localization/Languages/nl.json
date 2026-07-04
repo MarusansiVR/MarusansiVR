@@ -600,9 +600,9 @@
     { "key": "trackerLinking.tuning.calibrationTolerance", "value": "Kalibratietolerantie" },
     { "key": "trackerLinking.tuning.calibrationTolerance.description", "value": "Vermenigvuldigt de grootte van elke acceptatiezone per lichaamsdeel die wordt gebruikt bij het toewijzen van trackers aan rollen tijdens de full-body kalibratie. Hoger = vergevingsgezinder voor ongebruikelijke lichaamsverhoudingen, hoog gemonteerde trackers, een brede stand of een imperfecte T-pose, ten koste van incidentele verkeerde toewijzing. Standaard: 1." },
 
-    { "key": "menu.exit.dialog.title", "value": "Basis VR" },
-    { "key": "menu.exit.dialog.body", "value": "Weet je zeker dat je Basis wilt sluiten?" },
-    { "key": "menu.exit.dialog.confirm", "value": "Basis Afsluiten" },
+    { "key": "menu.exit.dialog.title", "value": "まるさんしVR" },
+    { "key": "menu.exit.dialog.body", "value": "Weet je zeker dat je まるさんしVR wilt sluiten?" },
+    { "key": "menu.exit.dialog.confirm", "value": "まるさんしVR Afsluiten" },
     { "key": "menu.exit.dialog.reboot", "value": "Opnieuw starten en opnieuw verbinden" },
     { "key": "menu.exit.dialog.restart", "value": "Opnieuw starten" },
 

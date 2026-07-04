@@ -12,8 +12,8 @@ PlayerSettings:
   targetDevice: 2
   useOnDemandResources: 0
   accelerometerFrequency: 60
-  companyName: Basis Unity
-  productName: Basis Unity
+  companyName: "\u307E\u308B\u3055\u3093\u3057VR"
+  productName: "\u307E\u308B\u3055\u3093\u3057VR"
   defaultCursor: {fileID: 2800000, guid: b6a94fc18d631d9ffa4a97234f1fefec, type: 3}
   cursorHotspot: {x: 9, y: 5}
   m_SplashScreenBackgroundColor: {r: 0.12156863, g: 0.12156863, b: 0.1254902, a: 1}

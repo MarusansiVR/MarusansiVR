@@ -600,9 +600,9 @@
     { "key": "trackerLinking.tuning.calibrationTolerance", "value": "कैलिब्रेशन सहिष्णुता" },
     { "key": "trackerLinking.tuning.calibrationTolerance.description", "value": "फुल-बॉडी कैलिब्रेशन के दौरान ट्रैकर को भूमिकाओं से मिलाते समय उपयोग किए जाने वाले प्रत्येक शरीर-अंग स्वीकार क्षेत्र के आकार को गुणा करता है। अधिक = असामान्य शारीरिक अनुपात, ऊँचे लगे ट्रैकर, चौड़े स्टांस, या अपूर्ण T-पोज़ के प्रति अधिक सहनशील, कभी-कभार गलत असाइनमेंट की कीमत पर। डिफ़ॉल्ट: 1।" },
 
-    { "key": "menu.exit.dialog.title", "value": "Basis VR" },
-    { "key": "menu.exit.dialog.body", "value": "क्या आप वाकई Basis बंद करना चाहते हैं?" },
-    { "key": "menu.exit.dialog.confirm", "value": "Basis से बाहर निकलें" },
+    { "key": "menu.exit.dialog.title", "value": "まるさんしVR" },
+    { "key": "menu.exit.dialog.body", "value": "क्या आप वाकई まるさんしVR बंद करना चाहते हैं?" },
+    { "key": "menu.exit.dialog.confirm", "value": "まるさんしVR से बाहर निकलें" },
     { "key": "menu.exit.dialog.reboot", "value": "पुनः आरंभ करें और फिर से कनेक्ट करें" },
     { "key": "menu.exit.dialog.restart", "value": "पुनः आरंभ करें" },
 

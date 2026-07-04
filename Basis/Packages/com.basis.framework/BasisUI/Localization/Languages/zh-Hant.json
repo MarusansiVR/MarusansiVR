@@ -600,9 +600,9 @@
     { "key": "trackerLinking.tuning.calibrationTolerance", "value": "校準容差" },
     { "key": "trackerLinking.tuning.calibrationTolerance.description", "value": "在全身校準期間將追蹤器配對到角色時，用來放大每個身體部位接受區的大小。數值越高，越能容許不尋常的身體比例、高處安裝的追蹤器、寬站姿或不完美的 T 姿勢，但代價是偶爾會誤指派。預設：1。" },
 
-    { "key": "menu.exit.dialog.title", "value": "Basis VR" },
-    { "key": "menu.exit.dialog.body", "value": "确定要关闭 Basis 吗？" },
-    { "key": "menu.exit.dialog.confirm", "value": "退出 Basis" },
+    { "key": "menu.exit.dialog.title", "value": "まるさんしVR" },
+    { "key": "menu.exit.dialog.body", "value": "确定要关闭 まるさんしVR 吗？" },
+    { "key": "menu.exit.dialog.confirm", "value": "退出 まるさんしVR" },
     { "key": "menu.exit.dialog.reboot", "value": "重新啟動並重新連線" },
     { "key": "menu.exit.dialog.restart", "value": "重新啟動" },
 
