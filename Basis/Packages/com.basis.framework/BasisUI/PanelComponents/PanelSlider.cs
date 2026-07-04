@@ -112,8 +112,10 @@ namespace Basis.BasisUI
 
         [Header("Slider Fill")]
         public Graphic FillGraphic;
-        public Color FillColorMin = new Color(0.35f, 0.55f, 0.85f, 1f);
-        public Color FillColorMax = new Color(0.25f, 0.8f, 0.5f, 1f);
+        // Misskey lime accent — slightly dimmer at the low end so the fill
+        // still reads as a gradient without leaving the theme hue.
+        public Color FillColorMin = new Color(0.40f, 0.53f, 0.08f, 1f);
+        public Color FillColorMax = new Color(0.53f, 0.70f, 0.0f, 1f);
         [Tooltip("When set, the fill color is sampled from this gradient (t = normalized slider position) instead of lerping FillColorMin -> FillColorMax.")]
         public Gradient FillColorGradient;
         public bool UseFillColorGradient;
