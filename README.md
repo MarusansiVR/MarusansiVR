@@ -33,7 +33,7 @@ This would not be possible without the following:
 - [K4os.Compression.LZ4](https://github.com/MiloszKrajewski/K4os.Compression.LZ4)
 - [cilbox](https://github.com/cnlohr/cilbox)
 
-## Third-Party Code and Trademarks
+## Third-Party Code
 
 This project includes third-party software under the following licenses:
 
