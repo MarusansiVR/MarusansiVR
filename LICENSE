@@ -70,3 +70,30 @@ SIL Open Font License 1.1
 Trademarks
 
 "Valve", "Steam", and the associated figurative images are trademarks and/or registered trademarks of Valve Corporation in the US and in various other jurisdictions. All rights reserved. Use of these trademarks must comply with the guidelines outlined in `Basis/Packages/com.steam.steamaudio/TRADEMARK_RIGHTS.md`.
+
+-----------------------------------------------------------------------
+
+Built With
+
+This would not be possible without the following:
+- ULipSync (https://github.com/hecomi/uLipSync)
+- UnityJigglePhysics (https://github.com/naelstrof/UnityJigglePhysics)
+- opussharp (https://github.com/AvionBlock/OpusSharp)
+- opus (https://github.com/xiph/opus)
+- Steam Audio (https://github.com/ValveSoftware/steam-audio)
+- Unity Starter Assets - ThirdPerson (https://assetstore.unity.com/packages/essentials/starter-assets-thirdperson-updates-in-new-charactercontroller-pa-196526)
+- RNNoise (https://github.com/xiph/rnnoise)
+- RNNoise.Net (https://github.com/Yellow-Dog-Man/RNNoise.Net)
+- unity (https://unity.com/)
+- ionic icons (https://github.com/ionic-team/ionicons)
+- LiteNetLib (https://github.com/RevenantX/LiteNetLib)
+- K4os.Compression.LZ4 (https://github.com/MiloszKrajewski/K4os.Compression.LZ4)
+- cilbox (https://github.com/cnlohr/cilbox)
+
+-----------------------------------------------------------------------
+
+Basis Trademark Guidelines
+
+"Basis", "BasisVR", "Basis Framework", and the Basis logo are marks representing the
+Basis Project. Please see TRADEMARK.md in the repository root for our policies
+on their usage.
