@@ -1,55 +1,55 @@
-name: Bug Report
-description: When stuff is broken.
+name: バグ報告
+description: どういう壊れ方をしたのか
 labels: [bug]
-assignees: doolyl123
+assignees: nodokaha
 body:
   - type: textarea
     id: Describe
     attributes:
-      label: Describe the bug?
-      description: Plainly detail what actually happened.
+      label: バグ概要
+      description: 詳細なバグ状況を記載
     validations:
       required: true
   - type: textarea
     id: reproduction
     attributes:
-      label: Steps to Reproduce
-      description: Describe the steps needed in order to reproduce the behavior.
+      label: 再現手順
+      description: どのようにして引き起こすのか
     validations:
       required: true
   - type: textarea
     id: expected-behavior
     attributes:
-      label: The expected behavior
-      description: What you expected to happen instead.
+      label: 起こった現象
+      description: 一体何が起こったのかを詳細に
     validations:
       required: true
   - type: textarea
     id: screenshots
     attributes:
-      label: Screenshots
-      description: Add media content here to assist with the troubleshooting.
+      label: スクリーンショット
+      description: 状況に関連する画像の提示
     validations:
       required: false
   - type: textarea
     id: buildinfo
     attributes:
-      label: Build Info
-      description: 'In Basis, open Settings > Developer and click the "Copy Build Info" button, then paste the result here. If it is not visible, enable "Build & Environment" under Section Visibility on that tab.'
+      label: ビルド情報
+      description: 'メニューでSettings > Developer のあと "Copy Build Info"をコピペ。もし見えなかったら"Build & Environment"を有効に'
       placeholder: 'Version: ...  Unity: ...  Platform: ...  Mode: ...  Build GUID: ...'
     validations:
       required: true
   - type: textarea
     id: log-files
     attributes:
-      label: Log Files
-      description: Snippet of the problem occurring in the BasisVR log files.
+      label: ログファイル
+      description: ログを貼り付ける
     validations:
       required: true
   - type: textarea
     id: additional-context
     attributes:
-      label: Additional Context
-      description: Any other detail about the issue goes here.
+      label: 備考
+      description: 追加で伝えたいことあれば
     validations:
       required: false

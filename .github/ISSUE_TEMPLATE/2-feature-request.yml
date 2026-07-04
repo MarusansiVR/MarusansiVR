@@ -1,33 +1,33 @@
 name: Feature Request
 description: Please submit your desired enhancement for the framework.
 labels: [enhancement]
-assignees: dooly123
+assignees: nodokaha
 body:
   - type: textarea
     id: problem
     attributes:
-      label: Is your feature request related to a problem?
-      description: A clear and brief description of what the problem is. For example, It frustrates me when...
+      label: あなたにとって問題であったこと
+      description: このPRが提案されるべき理由や、要望の詳細
     validations:
       required: true
   - type: textarea
     id: solution
     attributes:
-      label: Describe your preferred solution
-      description: A clear and brief description of what you would like to happen instead.
+      label: 解決策
+      description: 要望や問題への解決として有効である理由も含めて、解決となる概要
     validations:
       required: true
   - type: textarea
     id: alternatives
     attributes:
-      label: Describe any considered alternatives
-      description: A clear and brief description of possible alternative solutions.
+      label: さらなる問題との関連性
+      description: このPRがその他に関連した問題について言及する場合は記載
     validations:
       required: true
   - type: textarea
     id: additional-context
     attributes:
-      label: Additional Context
-      description: Any other detail about the feature request goes here.
+      label: 備考
+      description: その他書いておきたいことあれば
     validations:
       required: false
