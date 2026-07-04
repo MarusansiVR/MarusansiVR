@@ -465,8 +465,10 @@ Shader "Basis/UI/Background"
             Unity_Multiply_float_float(_Saturate_16d35af48cb0496e9a39a0cf9c358d17_Out_1_Float, _Property_51fa2b65fe5f484688c3a5b27b7dca7c_Out_0_Float, _Multiply_3eadde9df2574050b00fac3d783d6033_Out_2_Float);
             float4 _Lerp_5b7996ecf5894d2d954ae1217b06d51c_Out_3_Vector4;
             Unity_Lerp_float4(_SampleTexture2D_c7119f54d8a045928e67bdfee81e3ee1_RGBA_0_Vector4, _Vector4_c4e7d6ee52454afcbe5fea79e8e0b659_Out_0_Vector4, (_Multiply_3eadde9df2574050b00fac3d783d6033_Out_2_Float.xxxx), _Lerp_5b7996ecf5894d2d954ae1217b06d51c_Out_3_Vector4);
-            float4 Color_0dc5f24e6eb4455096f23a32ab8b326f = IsGammaSpace() ? LinearToSRGB(float4(0.08669343, 0.03644536, 0.1981132, 1)) : float4(0.08669343, 0.03644536, 0.1981132, 1);
-            float4 Color_31b5fe77e4ac49849a94c8fdbc310115 = IsGammaSpace() ? LinearToSRGB(float4(0.2264151, 0.02029191, 0.2130304, 1)) : float4(0.2264151, 0.02029191, 0.2130304, 1);
+            // Misskey dark theme: charcoal base with a faint lime shimmer
+            // (previously two baked purples that tinted the whole menu).
+            float4 Color_0dc5f24e6eb4455096f23a32ab8b326f = IsGammaSpace() ? LinearToSRGB(float4(0.030, 0.034, 0.038, 1)) : float4(0.030, 0.034, 0.038, 1);
+            float4 Color_31b5fe77e4ac49849a94c8fdbc310115 = IsGammaSpace() ? LinearToSRGB(float4(0.030, 0.048, 0.020, 1)) : float4(0.030, 0.048, 0.020, 1);
             float _Float_8c90062864ac406587bae5a65094b9bf_Out_0_Float = float(0.4);
             float _Multiply_3316979e02c44f8cb01d76f9ebe62662_Out_2_Float;
             Unity_Multiply_float_float(IN.TimeParameters.y, _Float_8c90062864ac406587bae5a65094b9bf_Out_0_Float, _Multiply_3316979e02c44f8cb01d76f9ebe62662_Out_2_Float);

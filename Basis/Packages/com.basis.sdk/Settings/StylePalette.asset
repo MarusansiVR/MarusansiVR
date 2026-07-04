@@ -14,19 +14,19 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   BackgroundColor1: {r: 1, g: 1, b: 1, a: 1}
   BackgroundColor2: {r: 0.7987421, g: 0.7987421, b: 0.7987421, a: 1}
-  BackgroundColor3: {r: 0.42745098, g: 0.4117647, b: 0.57254905, a: 0.2}
-  LayerColor: {r: 0.2, g: 0.2, b: 0.21, a: 0.5}
-  AccentColor: {r: 0.47413066, g: 0.49170873, b: 0.8238993, a: 1}
+  BackgroundColor3: {r: 0.12941177, g: 0.14509805, b: 0.15686275, a: 0.97}
+  LayerColor: {r: 0.078431375, g: 0.08627451, b: 0.09411765, a: 0.95}
+  AccentColor: {r: 0.5254902, g: 0.7019608, b: 0, a: 1}
   FontColor1: {r: 0.98039216, g: 0.9843137, b: 0.99215686, a: 1}
   FontColor2: {r: 0.8745098, g: 0.8862745, b: 0.8862745, a: 1}
   FontColor3: {r: 0.19775721, g: 0.2026522, b: 0.20754719, a: 1}
-  InputFieldColor: {r: 0.23431407, g: 0.21949284, b: 0.38993704, a: 1}
-  ButtonColor: {r: 0.42573604, g: 0.41214734, b: 0.57232696, a: 1}
+  InputFieldColor: {r: 0.16078432, g: 0.18039216, b: 0.19215687, a: 1}
+  ButtonColor: {r: 0.21960784, g: 0.24313726, b: 0.25882354, a: 1}
   WhiteColor: {r: 0.98, g: 1, b: 1, a: 1}
   ClearColor: {r: 0, g: 0, b: 0, a: 0}
   BlackColor: {r: 0.02, g: 0.02, b: 0.04, a: 1}
   SuccessColor: {r: 0.09, g: 0.8, b: 0.47, a: 1}
   CautionColor: {r: 1, g: 0.82, b: 0.34, a: 1}
-  DangerColor: {r: 0.97, g: 0.34, b: 0.34, a: 1}
-  Scrollbar: {r: 0.427451, g: 0.41176474, b: 0.57254905, a: 1}
+  DangerColor: {r: 0.949, g: 0.427, b: 0.658, a: 1}
+  Scrollbar: {r: 0.5254902, g: 0.7019608, b: 0, a: 1}
   EdgeColor: {r: 0, g: 0, b: 0, a: 0.14901961}
