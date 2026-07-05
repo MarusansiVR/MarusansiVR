@@ -40,7 +40,7 @@ jobs:
       actions: write # to allow us to manage cache
     env:
       projectPath: Basis
-      buildName: まるさんしVR
+      buildName: MarusansiVR
     strategy:
       fail-fast: false
       matrix:
@@ -156,7 +156,7 @@ jobs:
         with:
           type: "zip"
           directory: build/${{ matrix.targetPlatform }}
-          filename: "${{ github.workspace }}/まるさんしVR ${{ matrix.targetPlatform }}.zip"
+          filename: "${{ github.workspace }}/MarusansiVR ${{ matrix.targetPlatform }}.zip"
 
   build-client-android:
     name: Build client for Android
@@ -166,7 +166,7 @@ jobs:
       actions: write # to allow us to manage cache
     env:
       projectPath: Basis
-      buildName: まるさんしVR
+      buildName: MarusansiVR
     needs: [check-secret]
     if: needs.check-secret.outputs.secret-is-set == 'true' && needs.check-secret.outputs.android-secret-is-set == 'true'
     steps:
@@ -321,7 +321,7 @@ jobs:
     permissions:
       contents: write
     env:
-      buildName: まるさんしVR
+      buildName: MarusansiVR
     steps:
       - name: "Download all artifacts"
         uses: actions/download-artifact@v4
@@ -329,8 +329,8 @@ jobs:
         uses: "softprops/action-gh-release@v2"
         with:
           files: |
-            Basis-Client-StandaloneLinux64/まるさんしVR StandaloneLinux64.zip
-            Basis-Client-StandaloneWindows64/まるさんしVR StandaloneWindows64.zip
+            Basis-Client-StandaloneLinux64/MarusansiVR StandaloneLinux64.zip
+            Basis-Client-StandaloneWindows64/MarusansiVR StandaloneWindows64.zip
             Basis-Client-Android/${{ env.buildName }}.apk
             unitypackage_upload/Basis.sdk.unitypackage
             unitypackage_upload/Basis.full.unitypackage
