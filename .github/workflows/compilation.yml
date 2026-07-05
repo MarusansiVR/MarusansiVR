@@ -146,7 +146,7 @@ jobs:
         timeout-minutes: 2
         uses: actions/upload-artifact@v4
         with:
-          name: Basis-Client-${{ matrix.targetPlatform }}
+          name: MarusansiVR-${{ matrix.targetPlatform }}
           path: |
             build/${{ matrix.targetPlatform }}
             !build/${{ matrix.targetPlatform }}/${{ env.buildName }}_BackUpThisFolder_ButDontShipItWithYourGame
@@ -241,7 +241,7 @@ jobs:
         timeout-minutes: 2
         uses: actions/upload-artifact@v4
         with:
-          name: Basis-Client-Android
+          name: MarusansiVR-Android
           path: |
             build/Android
             !build/Android/${{ env.buildName }}_BackUpThisFolder_ButDontShipItWithYourGame
@@ -329,8 +329,8 @@ jobs:
         uses: "softprops/action-gh-release@v2"
         with:
           files: |
-            Basis-Client-StandaloneLinux64/MarusansiVR StandaloneLinux64.zip
-            Basis-Client-StandaloneWindows64/MarusansiVR StandaloneWindows64.zip
-            Basis-Client-Android/${{ env.buildName }}.apk
+            MarusansiVR-StandaloneLinux64/MarusansiVR StandaloneLinux64.zip
+            MarusansiVR-StandaloneWindows64/MarusansiVR StandaloneWindows64.zip
+            MarusansiVR-Android/${{ env.buildName }}.apk
             unitypackage_upload/Basis.sdk.unitypackage
             unitypackage_upload/Basis.full.unitypackage
