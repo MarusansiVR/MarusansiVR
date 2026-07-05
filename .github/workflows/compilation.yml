@@ -329,7 +329,8 @@ jobs:
         uses: "softprops/action-gh-release@v2"
         with:
           files: |
-            **/*.zip
-            **/*.apk
+            Basis-Client-StandaloneLinux64/MarusansiVR StandaloneLinux64.zip
+            Basis-Client-StandaloneWindows64/MarusansiVR StandaloneWindows64.zip
+            Basis-Client-Android/${{ env.buildName }}.apk
             unitypackage_upload/Basis.sdk.unitypackage
             unitypackage_upload/Basis.full.unitypackage
