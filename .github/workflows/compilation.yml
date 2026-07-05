@@ -148,7 +148,7 @@ jobs:
         with:
           type: "zip"
           directory: build/${{ matrix.targetPlatform }}
-          filename: "MarusansiVR-${{ matrix.targetPlatform }}.zip"
+          filename: "build/${{ matrix.targetPlatform }}/MarusansiVR-${{ matrix.targetPlatform }}.zip"
       - name: "Upload client artifact"
         timeout-minutes: 2
         uses: actions/upload-artifact@v4
