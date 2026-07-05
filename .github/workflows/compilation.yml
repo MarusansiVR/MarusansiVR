@@ -157,13 +157,7 @@ jobs:
           type: "zip"
           directory: build/${{ matrix.targetPlatform }}
           filename: "${{ github.workspace }}/まるさんしVR ${{ matrix.targetPlatform }}.zip"
-      - name: "Release client zip"
-        if: github.ref_type == 'tag' && matrix.targetPlatform != 'Android'
-        timeout-minutes: 5
-        uses: "softprops/action-gh-release@v2"
-        with:
-          files: |
-            ${{ github.workspace }}/まるさんしVR ${{ matrix.targetPlatform }}.zip
+
   build-client-android:
     name: Build client for Android
     timeout-minutes: 100
@@ -251,12 +245,6 @@ jobs:
           path: |
             build/Android
             !build/Android/${{ env.buildName }}_BackUpThisFolder_ButDontShipItWithYourGame
-      - name: "Release client apk"
-        if: github.ref_type == 'tag'
-        timeout-minutes: 5
-        uses: "softprops/action-gh-release@v2"
-        with:
-          files: build/Android/${{ env.buildName }}.apk
 
   build-server:
     name: Build server on Ubuntu
@@ -300,12 +288,6 @@ jobs:
           type: "zip"
           directory: build
           filename: "Basis Server ${{ matrix.runtimes }}.zip"
-      - name: "Release server zip"
-        if: github.ref_type == 'tag'
-        timeout-minutes: 5
-        uses: "softprops/action-gh-release@v2"
-        with:
-          files: build/Basis Server ${{ matrix.runtimes }}.zip
 
   compile-unitypackages:
     name: Build .unitypackage files
@@ -330,11 +312,25 @@ jobs:
           path: |
             Basis/Basis.sdk.unitypackage
             Basis/Basis.full.unitypackage
-      - name: "Release unitypackage"
-        if: github.ref_type == 'tag'
-        timeout-minutes: 5
+
+  publish-release:
+    name: Publish GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-client, build-client-android, build-server, compile-unitypackages]
+    if: github.ref_type == 'tag'
+    permissions:
+      contents: write
+    env:
+      buildName: まるさんしVR
+    steps:
+      - name: "Download all artifacts"
+        uses: actions/download-artifact@v4
+      - name: "Release all artifacts"
         uses: "softprops/action-gh-release@v2"
         with:
           files: |
-            Basis/Basis.sdk.unitypackage
-            Basis/Basis.full.unitypackage
+            Basis-Client-StandaloneLinux64/まるさんしVR StandaloneLinux64.zip
+            Basis-Client-StandaloneWindows64/まるさんしVR StandaloneWindows64.zip
+            Basis-Client-Android/${{ env.buildName }}.apk
+            unitypackage_upload/Basis.sdk.unitypackage
+            unitypackage_upload/Basis.full.unitypackage
