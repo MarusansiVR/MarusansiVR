@@ -142,6 +142,13 @@ jobs:
             echo "Deleting cache id: $cache_id"
             gh cache delete $cache_id
           done
+      - name: Archive client
+        uses: thedoctor0/zip-release@0.7.6
+        if: github.ref_type == 'tag'
+        with:
+          type: "zip"
+          directory: build/${{ matrix.targetPlatform }}
+          filename: "MarusansiVR-${{ matrix.targetPlatform }}.zip"
       - name: "Upload client artifact"
         timeout-minutes: 2
         uses: actions/upload-artifact@v4
@@ -150,13 +157,6 @@ jobs:
           path: |
             build/${{ matrix.targetPlatform }}
             !build/${{ matrix.targetPlatform }}/${{ env.buildName }}_BackUpThisFolder_ButDontShipItWithYourGame
-      - name: Archive client
-        uses: thedoctor0/zip-release@0.7.6
-        if: github.ref_type == 'tag' && matrix.targetPlatform != 'Android'
-        with:
-          type: "zip"
-          directory: build/${{ matrix.targetPlatform }}
-          filename: "${{ github.workspace }}/MarusansiVR ${{ matrix.targetPlatform }}.zip"
 
   build-client-android:
     name: Build client for Android
@@ -237,6 +237,13 @@ jobs:
             echo "Deleting cache id: $cache_id"
             gh cache delete $cache_id
           done
+      - name: Archive Android client
+        uses: thedoctor0/zip-release@0.7.6
+        if: github.ref_type == 'tag'
+        with:
+          type: "zip"
+          directory: build/Android
+          filename: "MarusansiVR-Android.zip"
       - name: "Upload client artifact"
         timeout-minutes: 2
         uses: actions/upload-artifact@v4
@@ -274,20 +281,20 @@ jobs:
           dotnet-version: "10.0.x"
       - name: "Build server"
         timeout-minutes: 10
-        run: "dotnet publish '${{ matrix.projectPath }}' -f net10.0 --self-contained --runtime '${{ matrix.runtimes }}' -o build -c Release"
-      - name: "Upload server artifact"
-        timeout-minutes: 2
-        uses: actions/upload-artifact@v4
-        with:
-          name: Basis-Server-${{ matrix.runtimes }}
-          path: "build"
+        run: "dotnet publish '${{ matrix.projectPath }}' -f net10.0 --self-contained --runtime '${{ matrix.runtimes }}' -o build/${{ matrix.runtimes }} -c Release"
       - name: Archive Release
         uses: thedoctor0/zip-release@0.7.6
         if: github.ref_type == 'tag'
         with:
           type: "zip"
-          directory: build
-          filename: "Basis Server ${{ matrix.runtimes }}.zip"
+          directory: build/${{ matrix.runtimes }}
+          filename: "Basis-Server-${{ matrix.runtimes }}.zip"
+      - name: "Upload server artifact"
+        timeout-minutes: 2
+        uses: actions/upload-artifact@v4
+        with:
+          name: Basis-Server-${{ matrix.runtimes }}
+          path: "build/${{ matrix.runtimes }}"
 
   compile-unitypackages:
     name: Build .unitypackage files
@@ -325,12 +332,15 @@ jobs:
     steps:
       - name: "Download all artifacts"
         uses: actions/download-artifact@v4
+        with:
+          path: artifacts
       - name: "Release all artifacts"
         uses: "softprops/action-gh-release@v2"
         with:
           files: |
-            MarusansiVR-StandaloneLinux64/MarusansiVR StandaloneLinux64.zip
-            MarusansiVR-StandaloneWindows64/MarusansiVR StandaloneWindows64.zip
-            MarusansiVR-Android/${{ env.buildName }}.apk
-            unitypackage_upload/Basis.sdk.unitypackage
-            unitypackage_upload/Basis.full.unitypackage
+            artifacts/MarusansiVR-StandaloneLinux64/*.zip
+            artifacts/MarusansiVR-StandaloneWindows64/*.zip
+            artifacts/MarusansiVR-Android/*.zip
+            artifacts/Basis-Server-*/*.zip
+            artifacts/unitypackage_upload/Basis.sdk.unitypackage
+            artifacts/unitypackage_upload/Basis.full.unitypackage
