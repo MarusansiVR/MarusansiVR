@@ -316,7 +316,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
-    needs: [build-client, build-client-android, build-server, compile-unitypackages]
+    needs: [build-client, build-server, compile-unitypackages]
     if: github.ref_type == 'tag'
     permissions:
       contents: write
