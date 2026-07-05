@@ -15,19 +15,19 @@ jobs:
           BODY: ${{ github.event.pull_request.body }}
         run: |
           if [ -z "$BODY" ]; then
-            echo "::error::PR body is empty. Fill out the PR template before this can merge."
+            echo "::error::PRの説明（本文）が空です。マージする前にPRテンプレートを記入してください。"
             exit 1
           fi
           SECTION=$(printf '%s\n' "$BODY" | awk '/required-checks-start/{flag=1; next} /required-checks-end/{flag=0} flag')
           if [ -z "$SECTION" ]; then
-            echo "::error::Required-checks block missing. Restore the template's <!-- required-checks-start --> ... <!-- required-checks-end --> markers."
+            echo "::error::必須チェック項目のブロックが見つかりません。テンプレートの ... マーカーを復元してください。"
             exit 1
           fi
           UNCHECKED=$(printf '%s\n' "$SECTION" | grep -cE '^\s*-\s*\[\s*\]' || true)
           if [ "$UNCHECKED" -gt 0 ]; then
-            echo "::error::PR has $UNCHECKED unchecked required item(s). Tick every box in the Required checks block before merging."
-            echo "Unchecked items:"
+            echo "::error::未チェックの必須項目が $UNCHECKED 件あります。マージする前に「必須チェック項目」ブロックのすべてのボックスにチェックを入れてください（該当しない場合はチェックを入れた上で「備考」欄に理由を記載）。"
+            echo "未チェックの項目:"
             printf '%s\n' "$SECTION" | grep -nE '^\s*-\s*\[\s*\]' || true
             exit 1
           fi
-          echo "All required checklist items are checked."
+          echo "すべての必須チェック項目がチェックされています。"
