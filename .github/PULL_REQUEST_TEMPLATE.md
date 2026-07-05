@@ -1,29 +1,29 @@
-## Summary
-<!-- What does this PR change and why? Link related issues. -->
+## 概要
+<!-- このPRで何がどのように変わるのか？ 関連するIssueのリンクをここに貼ってください。 -->
 
-## Required checks
-All boxes below must be ticked before this PR can merge. If a check is genuinely N/A, tick it anyway and explain under **Notes**.
+## 必須チェック項目
+このPRをマージするには、以下のすべてのチェックボックスにチェックを入れる必要があります。真に「該当なし（N/A）」であるチェック項目についても、チェックを入れた上で、その理由を **「備考」** 欄に説明してください。
 
 <!-- required-checks-start -->
-<!-- Tick the boxes in place — do not edit the line text. The pr-checklist workflow parses this block; per-PR context goes under Notes. -->
-- [ ] **Tested** — I built and ran this locally. The change works in the editor and (where relevant) in a built player.
-- [ ] **Transform access is combined and limited** — In hot paths, transform reads/writes go through `TransformAccessArray` or are otherwise batched. I have not added per-frame `transform.position` / `transform.rotation` / `transform.localPosition` calls inside loops. Whenever I need both position and rotation, I use the combined APIs — `SetPositionAndRotation` / `SetLocalPositionAndRotation` for writes, `GetPositionAndRotation` / `GetLocalPositionAndRotation` for reads — instead of two separate property accesses; the combined call does one local-to-world matrix traversal instead of two.
-- [ ] **Addressables used for asset/memory loading** — Any new asset loads go through Addressables. No new `Resources.Load`, no direct asset references that pull large content into memory on scene load.
-- [ ] **No new `GetComponent` / `AddComponent` where avoidable** — Where unavoidable, the result is cached on a field, and any `GetComponent<T>` is replaced with `TryGetComponent<T>(out var x)` — bare `GetComponent` will be denied. `TryGetComponent` is the modern API (Unity 2019.2+) and skips the Editor-only GC allocation `GetComponent` causes when a component is missing: Unity wraps the `null` return in a managed "fake null" object so its overloaded `==` operator can still detect destroyed C++ objects, and constructing that wrapper allocates; `TryGetComponent` returns a `bool` plus `out` parameter and never builds the wrapper. None of these calls run inside `Update`, `LateUpdate`, `FixedUpdate`, jobs, or other per-frame code paths.
-- [ ] **Per-frame work is scheduled through `BasisEventDriver`** — Any new per-frame work hooks into `BasisEventDriver` rather than adding standalone `Update` / `LateUpdate` / `FixedUpdate` callbacks on a MonoBehaviour.
-- [ ] **Anything added to `BasisEventDriver` is bulletproof, or guarded by `try`/`catch`** — `BasisEventDriver` runs the single per-frame tick that drives the whole framework (network apply, local player sim, blendshapes, JigglePhysics, nameplates, and more) as one sequential chain. An unhandled exception anywhere in that chain aborts the rest of the tick, so every step after the throwing one is silently skipped for that frame. New work added to the driver must either be guaranteed not to throw, or be wrapped in a `try`/`catch` that contains the failure and surfaces it through `BasisDebug` — logged once / rate-limited, never every frame (see the existing `HVRBasisBuiltInAddresses.Simulate()` guard for the pattern). Expect this to be scrutinized closely in review.
-- [ ] **Considered jobification** — I asked whether this work can be moved to a Unity Job (Burst-compiled where possible). If it can, it is. If it cannot, the reason is in **Notes**.
-- [ ] **No needless `{ get; set; }` properties or access lockdowns** — Public fields are fine; Basis is meant to be read and modified freely, so don't wall things off `private`/`internal` without a real reason. Don't wrap a field in `{ get; set; }` when the accessors do nothing — property accessors have a real performance cost vs direct field access, and the lead maintainer prefers plain fields (or a method / setter-only property when only the setter needs logic) over a noop-getter pair. For `.Instance` singletons, callers reassigning `Type.Instance` is allowed; if that would break your code, log a warning or throw — don't block the assignment. Locking down access is not your call.
-- [ ] **Camera access goes through `BasisLocalCameraDriver`** — Code that needs the local camera (transform, projection, rig data, etc.) pulls it from `BasisLocalCameraDriver` rather than looking one up itself. Don't roll a separate camera discovery path.
-- [ ] **Logging uses `BasisDebug`** — All new logging calls go through `BasisDebug.Log` / `BasisDebug.LogWarning` / `BasisDebug.LogError` (with an appropriate `LogTag`) instead of `UnityEngine.Debug.Log` / `Debug.LogWarning` / `Debug.LogError`. `BasisDebug` routes through Basis's tagged, color-coded logger and respects the project-wide `LoggingDisabled` toggle so logging can be killed at runtime; bare `Debug.Log` calls bypass that and will be denied.
-- [ ] **No scene-wide discovery for dependencies** — New code is architected so it does not need `FindObjectOfType` / `FindObjectsOfType` / `GameObject.Find` / `FindGameObjectsWithTag` to locate what it depends on. References are wired in — registered through an existing manager/driver, injected at init, or passed in by the caller — rather than discovered by scanning the scene at runtime. If a scene scan is genuinely unavoidable, justify it under **Notes**.
-- [ ] **No allocations in hot paths** — Per-frame code (Update / LateUpdate / FixedUpdate, simulation loops, jobs, anything called once per frame or more) does not allocate. No `new` on reference types, no LINQ, no `string` concatenation/interpolation, no boxing, no `foreach` over interface-typed collections. Allocate once at init and reuse the buffer.
-- [ ] **No debugging in hot paths** — No log calls of any kind on per-frame paths, including `BasisDebug`. Hot-path logging floods the console and incurs cost on every frame regardless of whether the message is filtered out downstream. If a hot-path log is needed while iterating, gate it behind `#if UNITY_EDITOR` and remove (or leave gated) before merge.
-- [ ] **Hot-path collection access is optimized** — Cache `.Count` (lists) / `.Length` (arrays) into a local `int` before the loop instead of re-reading the property each iteration. Prefer `T[]` (with a separate length int when the array is over-sized) over `List<T>` where the data is hot — Unity's mono BCL doesn't expose `CollectionsMarshal.AsSpan(List<T>)`, so a list can't be fed into `Span<T>` / unsafe paths cleanly. Where the perf justifies it, drop into `Span<T>` / `ref` locals / `Unsafe.As` / `unsafe` pointer code to skip bounds checks and copies, and call out the invariants you're relying on under **Notes** so reviewers can sanity-check them.
+<!-- チェックボックスへのチェックは、テキストを変更せずに行ってください。pr-checklist ワークフローがこのブロックを解析します。PRごとのコンテキストは「備考」欄に記載してください。 -->
+- [ ] **テスト実施済み** — ローカル環境でビルドして動作確認を行いました。変更内容がエディタ上、および（関連する場合は）ビルドされたプレイヤー上で正常に動作することを確認しています。
+- [ ] **Transform へのアクセスが集約・制限されている** — ホットパスにおいて、Transform の読み込み/書き込みは `TransformAccessArray` を経由しているか、あるいはバッチ処理されています。ループ内でフレームごとに `transform.position` / `transform.rotation` / `transform.localPosition` を呼び出す処理は追加していません。位置と回転の両方が必要な場合は、2回の別々のプロパティアクセスではなく、複合 API（書き込みには `SetPositionAndRotation` / `SetLocalPositionAndRotation`、読み込みには `GetPositionAndRotation` / `GetLocalPositionAndRotation`）を使用しています。複合呼び出しにすることで、ローカルからワールドへのマトリクス走査が2回ではなく1回で済みます。
+- [ ] **アセットやメモリのロードに Addressables が使用されている** — 新しいアセットのロードはすべて Addressables を経由しています。新規の `Resources.Load` や、シーンロード時に大容量のコンテンツをメモリに引き込むような直接的なアセット参照は含まれていません。
+- [ ] **回避可能な場所での新規の `GetComponent` / `AddComponent` の不使用** — 回避できない場合は結果をフィールドにキャッシュし、すべての `GetComponent<T>` は `TryGetComponent<T>(out var x)` に置き換えています。生の `GetComponent` は拒否されます。`TryGetComponent` はモダンな API（Unity 2019.2 以降）であり、コンポーネントが存在しない場合に `GetComponent` が引き起こすエディタ限定の GC アロケーションを回避できます。Unity は、オーバーロードされた `==` 演算子が破棄された C++ オブジェクトを検出できるように、戻り値の `null` をマネージドの「擬似 null」オブジェクトでラップしますが、このラッパーの構築にアロケーションが発生します。`TryGetComponent` は `bool` と `out` パラメータを返すため、このラッパーを構築しません。また、これらの呼び出しは `Update`、`LateUpdate`、`FixedUpdate`、ジョブ、またはその他のフレームごとのコードパス内では実行されていません。
+- [ ] **フレームごとの処理は `BasisEventDriver` を通してスケジュールされている** — 新しいフレームごとの処理は、MonoBehaviour にスタンドアロンの `Update` / `LateUpdate` / `FixedUpdate` コールバックを追加するのではなく、`BasisEventDriver` にフックしています。
+- [ ] **`BasisEventDriver` に追加された処理は堅牢であるか、`try`/`catch` で保護されている** — `BasisEventDriver` は、フレームワーク全体を駆動する単一のフレームごとの処理（ネットワークの適用、ローカルプレイヤーのシミュレーション、ブレンドシェイプ、JigglePhysics、ネームプレートなど）を一連のシーケンシャルなチェーンとして実行します。このチェーン内のどこかで未処理の例外が発生すると、そのフレームの残りの処理が中断され、例外が発生したステップ以降のすべての処理が警告なしにスキップされます。ドライバーに追加する新しい処理は、例外を絶対に投げないことを保証するか、失敗を限定的にして `BasisDebug` を通じて表面化させる `try`/`catch` でラップする必要があります。なお、ログはフレームごとではなく、1回のみ、またはレート制限をかけて出力してください（実装パターンについては既存の `HVRBasisBuiltInAddresses.Simulate()` の保護処理を参照）。レビューではこの点が厳しく精査されます。
+- [ ] **ジョブ化（Jobification）の検討** — この処理を Unity Job（可能な限り Burst コンパイル）に移行できるかどうかを検討しました。移行できる場合は移行済みです。移行できない場合は、その理由を **「備考」** 欄に記載しています。
+- [ ] **不要な `{ get; set; }` プロパティやアクセス制限がないこと** — パブリックフィールドで問題ありません。Basis は自由に読み書きされることを前提としているため、正当な理由がない限り `private`/`internal` でカプセル化しないでください。アクセサが何も処理を行わない場合は、フィールドを `{ get; set; }` でラップしないでください。プロパティアクセサは直接的なフィールドアクセスと比較して実質的なパフォーマンスコストが発生するため、リードメンテナーは何も処理しないゲッター/セッターのペアよりも、プレーンなフィールド（または、セッターにのみロジックが必要な場合はメソッドやセッターのみのプロパティ）を好みます。`.Instance` シングルトンについて、呼び出し側が `Type.Instance` を再代入することは許容されます。それがコードを破壊する場合は、警告をログに出力するか例外をスローしてください。代入自体をブロックしないでください。アクセスを制限するかどうかは、あなたの判断で決めることではありません。
+- [ ] **カメラへのアクセスは `BasisLocalCameraDriver` を経由している** — ローカルカメラ（Transform、プロジェクション、リグデータなど）を必要とするコードは、自身で検索するのではなく、`BasisLocalCameraDriver` から取得しています。独自のカメラ検出パスを構築しないでください。
+- [ ] **ロギングに `BasisDebug` が使用されている** — 新しいロギングの呼び出しは、`UnityEngine.Debug.Log` / `Debug.LogWarning` / `Debug.LogError` ではなく、すべて `BasisDebug.Log` / `BasisDebug.LogWarning` / `BasisDebug.LogError`（および適切な `LogTag`）を経由しています。`BasisDebug` は Basis のタグ付きカラーコード化されたロガーを経由し、プロジェクト全体の `LoggingDisabled` トグルに従うため、ランタイムにロギングを無効化できます。生の `Debug.Log` 呼び出しはこれをバイパスするため、拒否されます。
+- [ ] **依存関係のためのシーン全体の探索（ディスカバリ）を行わない** — 新しいコードは、依存するオブジェクトを特定するために `FindObjectOfType` / `FindObjectsOfType` / `GameObject.Find` / `FindGameObjectsWithTag` を必要としないように設計されています。参照は、ランタイムにシーンをスキャンして見つけるのではなく、既存のマネージャー/ドライバーを介して登録するか、初期化時にインジェクションするか、呼び出し側から渡すように配線してください。シーンのスキャンが本当に避けられない場合は、**「備考」** 欄でその理由を説明してください。
+- [ ] **ホットパスでのアロケーションがないこと** — フレームごとのコード（Update / LateUpdate / FixedUpdate、シミュレーションループ、ジョブ、または1フレームに1回以上呼び出されるすべての処理）ではアロケーションを発生させません。参照型の `new`、LINQ、`string` の結合/補間、ボックス化、インターフェース型のコレクションに対する `foreach` は使用禁止です。初期化時に一度アロケーションを行い、そのバッファを再利用してください。
+- [ ] **ホットパスでのデバッグを行わない** — `BasisDebug` を含め、フレームごとのパスではいかなる種類のログ呼び出しも行いません。ホットパスでのロギングはコンソールを埋め尽くし、メッセージが下流でフィルタリングされているかどうかに関わらず、すべてのフレームでコストが発生します。反復開発中にホットパスのログが必要な場合は、`#if UNITY_EDITOR` で囲み、マージ前に削除する（または囲んだままにする）ようにしてください。
+- [ ] **ホットパスにおけるコレクションアクセスの最適化** — ループの各反復でプロパティを再読み込みするのではなく、ループの前に `.Count`（リスト） / `.Length`（配列）をローカルの `int` 変数にキャッシュしています。データがホットな場合は、`List<T>` よりも `T[]`（配列が大きすぎる場合は別途長さを示す int を用意する）を優先してください。Unity の Mono BCL（基本クラスライブラリ）は `CollectionsMarshal.AsSpan(List<T>)` を公開していないため、リストを `Span<T>` や unsafe なパスに綺麗に渡すことができません。パフォーマンス上正当な理由がある場合は、`Span<T>` / `ref` ローカル変数 / `Unsafe.As` / `unsafe` ポインタコードを使用して境界チェックやコピーをスキップし、前提としている不変条件を **「備考」** 欄に明記して、レビュアーが妥当性を確認できるようにしてください。
 <!-- required-checks-end -->
 
-## Testing details
-Tick the platforms you actually tested on. Leave the rest unticked — these are informational and do not block merge.
+## テスト詳細
+実際にテストを行ったプラットフォームにチェックを入れてください。残りはチェックを入れずにそのままにしてください（これらは情報提供のためのものであり、マージをブロックしません）。
 
 - [ ] Windows
 - [ ] Linux
@@ -31,19 +31,19 @@ Tick the platforms you actually tested on. Leave the rest unticked — these are
 - [ ] iOS
 - [ ] macOS
 
-Input / control mode coverage:
+入力 / コントロールモードのカバー範囲：
 
-- [ ] Tested in VR (note headset under **Notes**)
-- [ ] Tested in desktop / non-VR mode
-- [ ] Tested with phone controls (mobile touch input)
-- [ ] N/A — change does not touch player/XR/input code
+- [ ] VRでテスト済み（HMDのモデルを **「備考」** 欄に記載してください）
+- [ ] デスクトップ / 非VRモードでテスト済み
+- [ ] スマホ操作（モバイルのタッチ入力）でテスト済み
+- [ ] 該当なし — 変更内容がプレイヤー/XR/入力関連のコードに触れていない
 
-Where applicable, confirm these flows still work after your changes:
+該当する場合、変更後も以下のフローが引き続き動作することを確認してください：
 
-- [ ] Hot-switching (desktop ↔ VR mode swap at runtime)
-- [ ] Avatar swapping
-- [ ] Server swapping (joining / leaving / changing servers)
-- [ ] N/A — change does not touch any of the above
+- [ ] ホットスイッチ（実行中のデスクトップ ↔ VR モードの切り替え）
+- [ ] アバターの切り替え
+- [ ] サーバーの切り替え（サーバーへの参加 / 退出 / 変更）
+- [ ] 該当なし — 変更内容が上記のいずれにも触れていない
 
-## Notes
-<!-- Optional context for reviewers. Headset model, why a required box is N/A, anything else worth knowing. -->
+## 備考
+<!-- レビュアー向けの任意のマテリアル。HMDのモデル、必須チェック項目が該当なし（N/A）である理由、その他共有すべき事項をここに記載してください。 -->

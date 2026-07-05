@@ -40,7 +40,7 @@ jobs:
       actions: write # to allow us to manage cache
     env:
       projectPath: Basis
-      buildName: Basis Unity
+      buildName: まるさんしVR
     strategy:
       fail-fast: false
       matrix:
@@ -150,44 +150,20 @@ jobs:
           path: |
             build/${{ matrix.targetPlatform }}
             !build/${{ matrix.targetPlatform }}/${{ env.buildName }}_BackUpThisFolder_ButDontShipItWithYourGame
-      - name: "Upload client symbols artifact"
-        timeout-minutes: 4
-        uses: actions/upload-artifact@v4
-        with:
-          name: Basis-Symbols-Client-${{ matrix.targetPlatform }}
-          path: |
-            build/${{ matrix.targetPlatform }}/${{ env.buildName }}_BackUpThisFolder_ButDontShipItWithYourGame
-      - name: Archive symbols
-        uses: thedoctor0/zip-release@0.7.6
-        if: github.ref_type == 'tag' && matrix.targetPlatform != 'Android'
-        with:
-          type: "zip"
-          directory: build/${{ matrix.targetPlatform }}
-          filename: "${{ github.workspace }}/Basis Unity ${{ matrix.targetPlatform }} Symbols.zip"
-          # This uses a wildcard because this action doesn't work correctly with spaces in path.
-          path: "*_BackUpThisFolder_ButDontShipItWithYourGame"
-      # workaround for exclusions not working with spaces *or* wildcards.
-      - name: Delete symbols
-        if: github.ref_type == 'tag' && matrix.targetPlatform != 'Android'
-        shell: bash
-        run: >
-          ${{ matrix.buildPlatform == 'ubuntu-latest' && 'sudo' || '' }}
-          rm -rvf "build/${{ matrix.targetPlatform }}/${{ env.buildName }}_BackUpThisFolder_ButDontShipItWithYourGame"
       - name: Archive client
         uses: thedoctor0/zip-release@0.7.6
         if: github.ref_type == 'tag' && matrix.targetPlatform != 'Android'
         with:
           type: "zip"
           directory: build/${{ matrix.targetPlatform }}
-          filename: "${{ github.workspace }}/Basis Unity ${{ matrix.targetPlatform }}.zip"
+          filename: "${{ github.workspace }}/まるさんしVR ${{ matrix.targetPlatform }}.zip"
       - name: "Release client zip"
         if: github.ref_type == 'tag' && matrix.targetPlatform != 'Android'
         timeout-minutes: 5
         uses: "softprops/action-gh-release@v2"
         with:
           files: |
-            ${{ github.workspace }}/Basis Unity ${{ matrix.targetPlatform }}.zip
-            ${{ github.workspace }}/Basis Unity ${{ matrix.targetPlatform }} Symbols.zip
+            ${{ github.workspace }}/まるさんしVR ${{ matrix.targetPlatform }}.zip
   build-client-android:
     name: Build client for Android
     timeout-minutes: 100
@@ -196,7 +172,7 @@ jobs:
       actions: write # to allow us to manage cache
     env:
       projectPath: Basis
-      buildName: Basis Unity
+      buildName: まるさんしVR
     needs: [check-secret]
     if: needs.check-secret.outputs.secret-is-set == 'true' && needs.check-secret.outputs.android-secret-is-set == 'true'
     steps:
@@ -275,13 +251,6 @@ jobs:
           path: |
             build/Android
             !build/Android/${{ env.buildName }}_BackUpThisFolder_ButDontShipItWithYourGame
-      - name: "Upload client symbols artifact"
-        timeout-minutes: 4
-        uses: actions/upload-artifact@v4
-        with:
-          name: Basis-Symbols-Client-Android
-          path: |
-            build/Android/${{ env.buildName }}_BackUpThisFolder_ButDontShipItWithYourGame
       - name: "Release client apk"
         if: github.ref_type == 'tag'
         timeout-minutes: 5
