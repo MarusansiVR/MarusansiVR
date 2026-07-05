@@ -600,9 +600,9 @@
     { "key": "trackerLinking.tuning.calibrationTolerance", "value": "تحمّل المعايرة" },
     { "key": "trackerLinking.tuning.calibrationTolerance.description", "value": "يضاعف حجم منطقة قبول كل جزء من الجسم المستخدمة عند مطابقة المتتبعات بالأدوار أثناء معايرة الجسم الكامل. الأعلى = أكثر تسامحًا مع نسب الجسم غير المعتادة أو المتتبعات المثبتة عاليًا أو الوقفة الواسعة أو وضعية T غير المثالية، مقابل سوء تعيين عرضي. الافتراضي: 1." },
 
-    { "key": "menu.exit.dialog.title", "value": "Basis VR" },
-    { "key": "menu.exit.dialog.body", "value": "هل أنت متأكد من أنك تريد إغلاق Basis؟" },
-    { "key": "menu.exit.dialog.confirm", "value": "الخروج من Basis" },
+    { "key": "menu.exit.dialog.title", "value": "まるさんしVR" },
+    { "key": "menu.exit.dialog.body", "value": "هل أنت متأكد من أنك تريد إغلاق まるさんしVR؟" },
+    { "key": "menu.exit.dialog.confirm", "value": "الخروج من まるさんしVR" },
     { "key": "menu.exit.dialog.reboot", "value": "إعادة التشغيل وإعادة الاتصال" },
     { "key": "menu.exit.dialog.restart", "value": "إعادة التشغيل" },
 

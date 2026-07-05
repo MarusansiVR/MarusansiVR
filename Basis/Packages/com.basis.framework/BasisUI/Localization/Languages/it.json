@@ -600,9 +600,9 @@
     { "key": "trackerLinking.tuning.calibrationTolerance", "value": "Tolleranza di calibrazione" },
     { "key": "trackerLinking.tuning.calibrationTolerance.description", "value": "Moltiplica la dimensione di ogni zona di accettazione delle parti del corpo usata per abbinare i tracker ai ruoli durante la calibrazione a corpo intero. Più alto = più tollerante verso proporzioni corporee insolite, tracker montati in alto, una postura larga o una T-pose imperfetta, al costo di occasionali assegnazioni errate. Predefinito: 1." },
 
-    { "key": "menu.exit.dialog.title", "value": "Basis VR" },
-    { "key": "menu.exit.dialog.body", "value": "Sei sicuro di voler chiudere Basis?" },
-    { "key": "menu.exit.dialog.confirm", "value": "Chiudi Basis" },
+    { "key": "menu.exit.dialog.title", "value": "まるさんしVR" },
+    { "key": "menu.exit.dialog.body", "value": "Sei sicuro di voler chiudere まるさんしVR?" },
+    { "key": "menu.exit.dialog.confirm", "value": "Chiudi まるさんしVR" },
     { "key": "menu.exit.dialog.reboot", "value": "Riavvia e riconnetti" },
     { "key": "menu.exit.dialog.restart", "value": "Riavvia" },
 

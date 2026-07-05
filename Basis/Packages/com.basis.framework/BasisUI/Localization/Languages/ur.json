@@ -600,9 +600,9 @@
     { "key": "trackerLinking.tuning.calibrationTolerance", "value": "کیلیبریشن رواداری" },
     { "key": "trackerLinking.tuning.calibrationTolerance.description", "value": "مکمل جسم کیلیبریشن کے دوران ٹریکرز کو کرداروں سے ملاتے وقت استعمال ہونے والے ہر جسمانی حصے کے قبول کرنے کے زون کی جسامت کو ضرب دیتا ہے۔ زیادہ = غیر معمولی جسمانی تناسب، اونچے نصب ٹریکرز، وسیع اسٹینس، یا نامکمل T-پوز کے لیے زیادہ رعایتی، کبھی کبھار غلط تفویض کی قیمت پر۔ ڈیفالٹ: 1۔" },
 
-    { "key": "menu.exit.dialog.title", "value": "Basis VR" },
-    { "key": "menu.exit.dialog.body", "value": "کیا آپ واقعی Basis کو بند کرنا چاہتے ہیں؟" },
-    { "key": "menu.exit.dialog.confirm", "value": "Basis سے باہر نکلیں" },
+    { "key": "menu.exit.dialog.title", "value": "まるさんしVR" },
+    { "key": "menu.exit.dialog.body", "value": "کیا آپ واقعی まるさんしVR کو بند کرنا چاہتے ہیں؟" },
+    { "key": "menu.exit.dialog.confirm", "value": "まるさんしVR سے باہر نکلیں" },
     { "key": "menu.exit.dialog.reboot", "value": "دوبارہ شروع کریں اور دوبارہ جڑیں" },
     { "key": "menu.exit.dialog.restart", "value": "دوبارہ شروع کریں" },
 

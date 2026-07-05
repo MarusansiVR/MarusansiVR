@@ -2076,15 +2076,15 @@
     },
     {
       "key": "menu.exit.dialog.title",
-      "value": "Basis VR"
+      "value": "まるさんしVR"
     },
     {
       "key": "menu.exit.dialog.body",
-      "value": "Are you sure you want to close Basis?"
+      "value": "Are you sure you want to close まるさんしVR?"
     },
     {
       "key": "menu.exit.dialog.confirm",
-      "value": "Exit Basis"
+      "value": "Exit"
     },
     {
       "key": "menu.exit.dialog.reboot",
