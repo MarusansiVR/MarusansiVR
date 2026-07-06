@@ -224,6 +224,9 @@ jobs:
           androidKeyaliasName: ${{ secrets.ANDROID_KEYALIAS_NAME }}
           androidKeyaliasPass: ${{ secrets.ANDROID_KEYALIAS_PASS }}
           linux64RemoveExecutableExtension: false
+      - name: "Fix build output permissions"
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" build/Android
       - name: "Save Library Cache"
         uses: actions/cache/save@v3
         if: always() && github.ref_name == 'developer'
