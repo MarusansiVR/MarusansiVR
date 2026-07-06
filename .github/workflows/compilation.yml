@@ -125,6 +125,10 @@ jobs:
           versioning: Custom
           version: ${{ steps.version.outputs.gitversion }}
           linux64RemoveExecutableExtension: false
+      - name: "Fix build output permissions"
+        if: matrix.buildPlatform == 'ubuntu-latest'
+        shell: bash
+        run: sudo chown -R "$(id -u):$(id -g)" "build/${{ matrix.targetPlatform }}"
       - name: "Save Library Cache"
         uses: actions/cache/save@v3
         if: always() && github.ref_name == 'developer'
@@ -148,7 +152,7 @@ jobs:
         with:
           type: "zip"
           directory: build/${{ matrix.targetPlatform }}
-          filename: "build/${{ matrix.targetPlatform }}/MarusansiVR-${{ matrix.targetPlatform }}.zip"
+          filename: "MarusansiVR-${{ matrix.targetPlatform }}.zip"
       - name: "Upload client artifact"
         timeout-minutes: 2
         uses: actions/upload-artifact@v4
