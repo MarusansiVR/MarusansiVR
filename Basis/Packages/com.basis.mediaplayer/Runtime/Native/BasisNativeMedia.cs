@@ -64,13 +64,25 @@ internal static class BasisNativeMedia
     private static extern long basis_media_get_position_us(IntPtr engine);
 
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
+    private static extern long basis_media_get_duration_us(IntPtr engine);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
+    private static extern int basis_media_seek_us(IntPtr engine, long targetUs);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
     private static extern int basis_media_get_last_error(IntPtr engine, byte[] buf, int bufSize);
 
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
     private static extern int basis_media_get_debug(IntPtr engine, byte[] buf, int bufSize);
 
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
+    private static extern int basis_media_get_transport(IntPtr engine, byte[] buf, int bufSize);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
     private static extern void basis_media_set_buffer(IntPtr engine, int mode, int bufferMs);
+
+    [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
+    private static extern void basis_media_set_audio_latency(IntPtr engine, int latencyUs);
 
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
     private static extern void basis_media_set_output_texture(IntPtr engine, IntPtr nativeTexture, int w, int h);
@@ -191,6 +203,24 @@ internal static class BasisNativeMedia
 
     public static long GetPositionUs(IntPtr e) => e == IntPtr.Zero ? -1 : basis_media_get_position_us(e);
 
+    // 0 = unknown/live (also the "no seekable timeline" signal). Old native
+    // libraries without the export read as 0 — same as a live source.
+    public static long GetDurationUs(IntPtr e)
+    {
+        if (e == IntPtr.Zero) return 0;
+        try { return basis_media_get_duration_us(e); }
+        catch (EntryPointNotFoundException) { return 0; }
+    }
+
+    // Asynchronous: the demuxer repositions at its next sample boundary and
+    // playback resumes from the preceding keyframe / segment boundary.
+    public static bool SeekUs(IntPtr e, long targetUs)
+    {
+        if (e == IntPtr.Zero) return false;
+        try { return basis_media_seek_us(e, targetUs) == 0; }
+        catch (EntryPointNotFoundException) { return false; }
+    }
+
     public static string GetLastError(IntPtr e)
     {
         if (e == IntPtr.Zero) return null;
@@ -203,6 +233,16 @@ internal static class BasisNativeMedia
     public static void SetBuffer(IntPtr e, int mode, int bufferMs)
     {
         if (e != IntPtr.Zero) basis_media_set_buffer(e, mode, bufferMs);
+    }
+
+    // Reports the managed audio sink's measured output latency (µs) so the backend
+    // paces video to match. Old libraries without the export (the desktop DLL,
+    // which self-times) no-op — they keep their own A/V timing.
+    public static void SetAudioLatencyUs(IntPtr e, int latencyUs)
+    {
+        if (e == IntPtr.Zero) return;
+        try { basis_media_set_audio_latency(e, latencyUs); }
+        catch (EntryPointNotFoundException) { }
     }
 
     // Register a Unity-allocated RenderTexture as the engine's render target.
@@ -226,6 +266,19 @@ internal static class BasisNativeMedia
         int n = basis_media_get_debug(e, buf, buf.Length);
         if (n <= 0) return null;
         return System.Text.Encoding.UTF8.GetString(buf, 0, Math.Min(n, buf.Length));
+    }
+
+    public static string GetTransport(IntPtr e)
+    {
+        if (e == IntPtr.Zero) return null;
+        var buf = new byte[64];
+        try
+        {
+            int n = basis_media_get_transport(e, buf, buf.Length);
+            if (n <= 0) return null;
+            return System.Text.Encoding.UTF8.GetString(buf, 0, Math.Min(n, buf.Length));
+        }
+        catch (EntryPointNotFoundException) { return null; } // binary predates the transport API (stub platforms)
     }
 
     public static IntPtr GetTexture(IntPtr e, out int w, out int h)

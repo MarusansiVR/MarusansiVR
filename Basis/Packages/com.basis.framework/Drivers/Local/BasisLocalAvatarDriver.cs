@@ -27,6 +27,17 @@ namespace Basis.Scripts.Drivers
         /// <summary>Addressables key for the default locomotion animator controller.</summary>
         public const string Locomotion = "Locomotion";
 
+        /// <summary>
+        /// One-time T-pose snapshot of the RAW avatar joints, captured per avatar load while the avatar
+        /// is physically T-posed: role → unscaled, animator-root-local bone pose. This is the "capture
+        /// once at load, derive everything after" source calibration consumes (arm span, offset
+        /// references, offset reprojection) instead of re-reading live bones inside a T-pose window.
+        /// NOTE: deliberately raw joints — the bone-control TposeLocal is a MODIFIED T-pose (spine
+        /// snapped to the centerline, fallback-DB percentage positions) and cannot substitute for it.
+        /// </summary>
+        public static readonly Dictionary<BasisBoneTrackedRole, BasisCalibratedCoords> TposeBoneSnapshot = new Dictionary<BasisBoneTrackedRole, BasisCalibratedCoords>();
+        public static bool HasTposeBoneSnapshot;
+
         /// <summary>Cached original head scale recorded during initialization.</summary>
         public static Vector3 HeadScale = Vector3.one;
 
@@ -138,6 +149,14 @@ namespace Basis.Scripts.Drivers
             player.BasisAvatar.Animator.applyRootMotion = false;
             player.BasisAvatar.HumanScale = player.BasisAvatar.Animator.humanScale;
 
+            // The previous avatar's raw-joint T-pose snapshot is stale for this avatar. Clear it BEFORE
+            // the T-pose height capture below, or CalculateAvatarArmSpan serves the OLD avatar's arm
+            // span (its live-bone fallback never fires while a snapshot exists) — which made every
+            // avatar swap mis-scale in ArmSpan/Auto mode until the user recalibrated. The fresh
+            // snapshot is captured further down, before SetBodySettings consumes it.
+            TposeBoneSnapshot.Clear();
+            HasTposeBoneSnapshot = false;
+
             // Enter T-Pose for calibration
             PutAvatarIntoTPose();
 
@@ -190,6 +209,13 @@ namespace Basis.Scripts.Drivers
             }
 
             CollectHeadChopEntries(harvestedHeadChop);
+
+            // Capture the raw-joint T-pose snapshot while the avatar is still physically T-posed and
+            // Mapping is populated — BEFORE SetBodySettings, whose rig build re-derives the FBT rotation
+            // offsets (ApplyCalibrationToCurrentAvatar) from this snapshot; capturing later would hand
+            // that rebuild the previous avatar's binds. Everything downstream (arm span, offset capture
+            // references, offset reprojection) derives from this data instead of live bone reads.
+            CaptureTposeBoneSnapshot();
 
             player.AvatarTransform.rotation = player.transform.rotation;
             player.LocalBoneDriver.SimulateAndApplyWithoutLerp(player);
@@ -468,6 +494,47 @@ namespace Basis.Scripts.Drivers
         }
 
         /// <summary>
+        /// Fills <see cref="TposeBoneSnapshot"/> from the live (physically T-posed) raw avatar joints:
+        /// animator-root-local, with the current avatar scale divided out so entries are the pure bind.
+        /// Consumers re-anchor and re-scale as needed (root ⊗ bind × scale). Must run while the avatar
+        /// is T-posed and Mapping is populated — InitialLocalCalibration calls it right after
+        /// CalculateTransformPositions.
+        /// </summary>
+        public void CaptureTposeBoneSnapshot()
+        {
+            TposeBoneSnapshot.Clear();
+            HasTposeBoneSnapshot = false;
+            if (Mapping.HasAnimatorRoot == false || Mapping.AnimatorRoot == null)
+            {
+                BasisDebug.LogError("CaptureTposeBoneSnapshot: no animator root; snapshot unavailable.", BasisDebug.LogTag.Avatar);
+                return;
+            }
+
+            Mapping.AnimatorRoot.GetPositionAndRotation(out Vector3 rootPos, out Quaternion rootRot);
+            Quaternion invRoot = Quaternion.Inverse(rootRot);
+            float scale = ScaleAvatarModification != null ? ScaleAvatarModification.ApplyScale : 1f;
+            if (float.IsNaN(scale) || float.IsInfinity(scale) || scale <= 1e-6f)
+            {
+                scale = 1f;
+            }
+
+            Dictionary<BasisBoneTrackedRole, Transform> roles = BasisAvatarIKStageCalibration.GetAllRolesAsTransform();
+            foreach (KeyValuePair<BasisBoneTrackedRole, Transform> pair in roles)
+            {
+                Transform bone = pair.Value;
+                if (bone == null)
+                {
+                    continue;
+                }
+                bone.GetPositionAndRotation(out Vector3 bonePos, out Quaternion boneRot);
+                TposeBoneSnapshot[pair.Key] = new BasisCalibratedCoords(
+                    (invRoot * (bonePos - rootPos)) / scale,
+                    invRoot * boneRot);
+            }
+            HasTposeBoneSnapshot = TposeBoneSnapshot.Count > 0;
+        }
+
+        /// <summary>
         /// Restores the original animator controller and leaves T-pose mode, raising the state change event.
         /// </summary>
         public void ResetAvatarAnimator()
@@ -503,7 +570,7 @@ namespace Basis.Scripts.Drivers
                     case BasisBoneTrackedRole.CenterEye:
                         {
                             // Convert avatar-local eye position to world and apply
-                            GetWorldSpacePos(BasisHelpers.AvatarPositionConversion(basisPlayer.BasisAvatar.AvatarEyePosition), RootPosition, out float3 world);
+                            GetWorldSpacePos(BasisHelpers.AvatarPositionConversion(basisPlayer.BasisAvatar.AvatarEyePosition), RootPosition, RootRotation, out float3 world);
                             SetInitialData(rootTransform, control, role, world, RootRotation);
                             break;
                         }
@@ -511,7 +578,7 @@ namespace Basis.Scripts.Drivers
                     case BasisBoneTrackedRole.Mouth:
                         {
                             // Convert avatar-local mouth position to world and apply
-                            GetWorldSpacePos(BasisHelpers.AvatarPositionConversion(basisPlayer.BasisAvatar.AvatarMouthPosition), RootPosition, out float3 world);
+                            GetWorldSpacePos(BasisHelpers.AvatarPositionConversion(basisPlayer.BasisAvatar.AvatarMouthPosition), RootPosition, RootRotation, out float3 world);
                             SetInitialData(rootTransform, control, role, world, RootRotation);
                             break;
                         }
@@ -543,14 +610,15 @@ namespace Basis.Scripts.Drivers
         }
 
         /// <summary>
-        /// Converts a local avatar-space position to world space based on animator position.
+        /// Converts a local avatar-space position to world space based on animator position and rotation.
         /// </summary>
         /// <param name="localAvatarSpace">Point in avatar-local coordinates.</param>
         /// <param name="AnimatorPosition">Animator world position used as origin.</param>
+        /// <param name="AnimatorRotation">Animator world rotation used as the basis.</param>
         /// <param name="position">Out: computed world position.</param>
-        public void GetWorldSpacePos(Vector3 localAvatarSpace, Vector3 AnimatorPosition, out float3 position)
+        public void GetWorldSpacePos(Vector3 localAvatarSpace, Vector3 AnimatorPosition, Quaternion AnimatorRotation, out float3 position)
         {
-            position = BasisHelpers.ConvertFromLocalSpace(localAvatarSpace, AnimatorPosition);
+            position = BasisHelpers.ConvertFromLocalSpace(localAvatarSpace, AnimatorPosition, AnimatorRotation);
         }
 
         /// <summary>

@@ -1,0 +1,69 @@
+# Mocap corpus — third-party data
+
+Ground truth for `BasisMocapAccuracyTests` (is the solved pose RIGHT?) and `BasisMocapMotionQualityTests`
+(is the solved MOTION right?). Not shipped in player builds and not imported by Unity: the trailing `~` on
+the folder name keeps it out of the asset database entirely.
+
+**Licensing is recorded in `Packages/com.basis.framework/THIRD_PARTY_NOTICES.md`** — the package-root file
+the rest of the repo uses for this. The short version is repeated at the bottom of this file so nobody has
+to go looking, but the notices file is the authority.
+
+## CMU Graphics Lab Motion Capture Database
+
+- Source: http://mocap.cs.cmu.edu/
+- BVH conversion: Bruce Hahne (cgspeed), via https://github.com/una-dinosauria/cmu-mocap
+- Files: `02_01.bvh` (general motion), `07_01.bvh` (walk), `09_01.bvh` (run)
+- Files, added: a filename is the CMU `subject_trial` — `141_20.bvh` is subject 141, trial 20, and the CMU
+  index describes every trial. Picked for the poses a VR user actually holds, idle first:
+  - `77_02.bvh` (standing still), `113_21.bvh` (standing still, long quiet hold), `141_20.bvh` (waiting —
+    restless idle: weight shifts and small steps in place, no net travel)
+  - `141_15.bvh` (range of motion — a full sweep of every joint through its limits)
+  - `143_11.bvh` (walk up, bend, pick up box), `143_26.bvh` (washing a window — sustained arm reach),
+    `26_09.bvh` (bend over, pick up), `69_70.bvh` (walk to object, squat, pick up, set down)
+  - `69_16.bvh` (turn in place), `77_05.bvh` (look around with a flashlight)
+  - `07_04.bvh` (slow walk), `132_18.bvh` (fast walk), `16_11.bvh` (walk, veering left — curved path)
+  - `143_18.bvh` (sit down and get up), `141_17.bvh` (sit on a stool)
+  - `143_25.bvh` (waving)
+  - `143_17.bvh` (walk up stairs and step over)
+
+## License
+
+CMU places no restrictions on the use of this data, including commercial use. From the database's own terms:
+
+> This data is free for use in research and commercial projects worldwide. You may include this data in
+> commercially-released products.
+
+No attribution is required. The database was created with funding from **NSF EIA-0196217**, and CMU asks
+that work using it carry this acknowledgement, which we do:
+
+> The data used in this project was obtained from mocap.cs.cmu.edu. The database was created with funding
+> from NSF EIA-0196217.
+
+The cgspeed BVH conversion adds no restrictions of its own — it is a reformatting of the same data.
+
+## ⚠️ Fidelity limits — read before trusting a number that comes out of here
+
+The corpus is REAL HUMAN MOTION, but it is not a VR user, and two differences have already produced
+misleading measurements:
+
+1. **A mocap hand is not a controller.** These clips carry a hand-BONE rotation from a marker-fitted
+   skeleton. A VR controller's rotation is a GRIP convention. Anything in the IK that reads the hand's
+   *rotation* (the chicken-wing elbow flare does) is therefore being fed a convention it was not designed
+   for, and a result that hinges on it must be confirmed in a headset before it is believed. This is not
+   hypothetical: measured against this corpus the flare engages ~0.5 on average and 0.89 while STANDING
+   STILL, which is either a real bug or exactly this artefact — and the corpus alone cannot tell you which.
+
+2. **The mocap has its own noise floor**, ~0.2% of limb length above 8 Hz (about 1.2 mm on an adult arm),
+   which is the optical rig, not the human. Any jitter metric taken from here is an EXCESS over that floor,
+   never an absolute. Differentiating the raw signal measures the rig; low-pass first
+   (`BasisMotionSignal.LowPass`) or the number is fiction.
+
+What the corpus IS unimpeachable for: joint POSITIONS and their time-derivatives. Those are anatomy, and
+they transfer.
+
+## Adding more clips
+
+Drop any `.bvh` into this folder and the tests pick it up automatically. The loader expects the standard
+Biovision hierarchy with CMU/Biovision joint names (`LeftArm`, `LeftForeArm`, `LeftUpLeg`, …); see the name map
+in `BasisBvhLoader`. Every clip is checked for anatomical sanity (left hand on the left, knees bending forward)
+before any measurement is taken from it, so a bad file fails loudly rather than quietly skewing the numbers.

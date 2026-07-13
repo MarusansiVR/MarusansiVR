@@ -1,4 +1,4 @@
-using Basis.Scripts.Common;
+﻿using Basis.Scripts.Common;
 using Basis.Scripts.Drivers;
 using System;
 using System.Collections.Generic;
@@ -69,6 +69,14 @@ namespace Basis.Scripts.TransformBinders.BoneControl
         [SerializeField] private BasisHasRigLayer hasRigLayer = BasisHasRigLayer.HasNoRigLayer;
 
         /// <summary>T-pose local-space reference (calibration data, not job-accessed).</summary>
+        /// <summary>
+        /// How strongly this bone's rig layer applies, 0..1. Only the HANDS read it today: a producer that comes
+        /// and goes (webcam tracking) has to fade its IK in and out, because snapping the layer on and off pops
+        /// the arm between the tracked pose and the animated one. HasRigLayer stays the on/off switch; this is
+        /// how far along that switch is.
+        /// </summary>
+        public float RigLayerWeight = 1f;
+
         [SerializeField] public BasisCalibratedCoords TposeLocal = new BasisCalibratedCoords();
 
         /// <summary>Scaled T-pose local-space reference (calibration data, not job-accessed).</summary>
@@ -107,6 +115,32 @@ namespace Basis.Scripts.TransformBinders.BoneControl
                 ref BasisBoneSimState s = ref Owner._simStatesPtr[Index];
                 return new BasisCalibratedCoords(s.OutgoingWorldPosition, s.OutgoingWorldRotation);
             }
+        }
+
+        /// <summary>
+        /// World-space pose of this bone AFTER the full-body IK solve (the rendered bone), published by
+        /// <see cref="BasisLocalRigDriver"/> once the rig evaluates. Unlike <see cref="OutgoingWorldData"/>
+        /// (the pre-IK target the solver aims at), this is where the bone actually ended up. Published for every
+        /// bone control after the rig evaluates; bones with no solved transform (center-eye, mouth, or a bone the
+        /// avatar lacks) fall back to <see cref="OutgoingWorldData"/>. Zero/identity rotation until the first solve.
+        /// </summary>
+        public unsafe BasisCalibratedCoords IKWorldData
+        {
+            get
+            {
+                if (Owner == null) return BasisCalibratedCoords.Identity;
+                ref BasisBoneSimState s = ref Owner._simStatesPtr[Index];
+                return new BasisCalibratedCoords(s.IKWorldPosition, s.IKWorldRotation);
+            }
+        }
+
+        /// <summary>Publishes the post-IK world pose into the native store; call on the main thread after the rig evaluates.</summary>
+        public unsafe void SetIKWorldData(Vector3 position, Quaternion rotation)
+        {
+            if (Owner == null) return;
+            ref BasisBoneSimState s = ref Owner._simStatesPtr[Index];
+            s.IKWorldPosition = position;
+            s.IKWorldRotation = rotation;
         }
 
         /// <summary>Pose from the previous compute step (local space).</summary>

@@ -30,10 +30,22 @@ namespace Basis.BasisUI.MediaPlayer
         private PanelElementDescriptor _debugGroup;
         private PanelToggle _debugToggle;
         private PanelTextField _urlField;
+        private PanelSlider _seekSlider;
+        private float _seekPendingAt = -1f;   /* unscaled time of the last handle move; <0 = none */
+        private float _seekPendingPct;
+        private bool _drivingSeekSlider;      /* our write, not the user's drag */
+        private double _seekAwaitPosS;        /* issued seek target, held until position lands */
+        private float _seekAwaitUntil = -1f;
+        private const float SeekDebounceSeconds = 0.35f;
+        private int _lastPosSec = -1;
+        private int _lastDurSec = -1;
+        private string _metaTitle;
+        private string _metaUploader;
         private PanelSlider _volumeSlider;
         private PanelToggle _captionsToggle;
         private PanelSlider _captionTextOpacitySlider;
         private PanelSlider _captionBgOpacitySlider;
+        private PanelDropdown _subtitleDropdown;
         private PanelDropdown _bitrateDropdown;
         private PanelDropdown _audioTrackDropdown;
         private PanelToggle _advancedToggle;
@@ -116,6 +128,25 @@ namespace Basis.BasisUI.MediaPlayer
                 PanelElementDescriptor.ElementStyles.ScrollViewVertical, container);
             _scrollContent = scroll.ContentParent;
 
+            // The shared scroll-view prefab ships a bare, zero-anchored viewport
+            // with no mask, so content taller than the panel draws straight past
+            // its bounds (Page-style panels have no panel-level mask to catch
+            // it). Bound the viewport to the scroll rect and mask it — the
+            // standard scroll-view construction — so this panel's content clips
+            // and scrolls like the settings pages.
+            if (scroll.TryGetComponent(out ScrollRect scrollRect) && scrollRect.viewport != null)
+            {
+                RectTransform viewport = scrollRect.viewport;
+                viewport.anchorMin = Vector2.zero;
+                viewport.anchorMax = Vector2.one;
+                viewport.offsetMin = Vector2.zero;
+                viewport.offsetMax = new Vector2(-25f, 0f); // clear of the vertical scrollbar
+                if (!viewport.TryGetComponent(out RectMask2D _))
+                {
+                    viewport.gameObject.AddComponent<RectMask2D>();
+                }
+            }
+
             _selector = PanelDropdown.CreateNewEntry(_scrollContent);
             _selector.Descriptor.SetTitle("Player");
             _selector.OnValueChanged = _ => OnSelectionChanged();
@@ -158,10 +189,18 @@ namespace Basis.BasisUI.MediaPlayer
             _debugGroup = null;
             _debugToggle = null;
             _urlField = null;
+            _seekSlider = null;
+            _seekPendingAt = -1f;
+            _seekAwaitUntil = -1f;
+            _lastPosSec = -1;
+            _lastDurSec = -1;
+            _metaTitle = null;
+            _metaUploader = null;
             _volumeSlider = null;
             _captionsToggle = null;
             _captionTextOpacitySlider = null;
             _captionBgOpacitySlider = null;
+            _subtitleDropdown = null;
             _bitrateDropdown = null;
             _audioTrackDropdown = null;
             _advancedToggle = null;
@@ -229,6 +268,27 @@ namespace Basis.BasisUI.MediaPlayer
                 else _activePlayer.Stop();
             };
 
+            // Timeline scrubber — visible only for media with a seekable
+            // timeline (Duration > 0). The slider has no drag events, so the
+            // seek is issued once the handle rests (debounced in RefreshSeekBar,
+            // which also keeps its hands off the knob while a drag is pending).
+            // Playback drives it through SliderComponent.value — the same path
+            // dragging uses — with _drivingSeekSlider distinguishing our writes
+            // from the user's.
+            _seekSlider = PanelSlider.CreateNew(content);
+            _seekSlider.SetSliderSettings(PanelSlider.SliderSettings.Advanced(
+                "Position", 0f, 100f, false, 0, ValueDisplayMode.Percentage));
+            // uGUI's own event, not the panel Action (which only fires on
+            // release): every drag move must re-arm the debounce, or the
+            // per-tick playhead writes would snap the handle away mid-drag.
+            _seekSlider.SliderComponent.onValueChanged.AddListener(v =>
+            {
+                if (_activePlayer == null || _drivingSeekSlider) return;
+                _seekPendingPct = v;
+                _seekPendingAt = Time.unscaledTime;
+            });
+            _seekSlider.gameObject.SetActive(false);
+
             _bitrateDropdown = PanelDropdown.CreateNewEntry(content);
             _bitrateDropdown.Descriptor.SetTitle("Bitrate");
             _bitrateDropdown.OnValueChanged = _ =>
@@ -272,12 +332,25 @@ namespace Basis.BasisUI.MediaPlayer
 
             _captionsToggle = PanelToggle.CreateNewEntry(content);
             _captionsToggle.Descriptor.SetTitle("Captions (CC)");
-            _captionsToggle.Descriptor.SetDescription("Show in-band closed captions when the stream carries them.");
+            _captionsToggle.Descriptor.SetDescription("Show closed captions when the stream or its subtitle tracks carry them.");
             _captionsToggle.OnValueChanged = v =>
             {
                 if (_activePlayer != null) _activePlayer.CaptionsEnabled = v;
                 ApplyCaptionOptionsVisibility(v);
             };
+
+            // Language selector for out-of-band subtitle tracks. Hidden unless
+            // the loaded media actually offers tracks AND captions are on — the
+            // panel stays clutter-free for everything else. Row 0 returns to
+            // the in-band default.
+            _subtitleDropdown = PanelDropdown.CreateNewEntry(content);
+            _subtitleDropdown.Descriptor.SetTitle("Subtitles");
+            _subtitleDropdown.OnValueChanged = _ =>
+            {
+                if (_activePlayer == null || _subtitleDropdown == null) return;
+                _activePlayer.SelectSubtitleTrack(_subtitleDropdown.Index - 1);
+            };
+            _subtitleDropdown.gameObject.SetActive(false);
 
             _captionTextOpacitySlider = PanelSlider.CreateNew(content);
             _captionTextOpacitySlider.SetSliderSettings(PanelSlider.SliderSettings.Percentage("Text Opacity"));
@@ -369,6 +442,9 @@ namespace Basis.BasisUI.MediaPlayer
             if (_activePlayer == null) return;
             _activePlayer.OnBitrateTrackChanged += HandleActiveBitrateChanged;
             _activePlayer.OnAudioTrackChanged += HandleActiveAudioTrackChanged;
+            _activePlayer.OnSubtitleTrackChanged += HandleActiveSubtitleTrackChanged;
+            _activePlayer.OnMetadataChanged += HandleActiveMetadataChanged;
+            HandleActiveMetadataChanged(_activePlayer.Metadata);
         }
 
         private void UnsubscribeFromActivePlayer()
@@ -376,13 +452,30 @@ namespace Basis.BasisUI.MediaPlayer
             if (_activePlayer == null) return;
             _activePlayer.OnBitrateTrackChanged -= HandleActiveBitrateChanged;
             _activePlayer.OnAudioTrackChanged -= HandleActiveAudioTrackChanged;
+            _activePlayer.OnSubtitleTrackChanged -= HandleActiveSubtitleTrackChanged;
+            _activePlayer.OnMetadataChanged -= HandleActiveMetadataChanged;
         }
 
         private void HandleActiveBitrateChanged(BasisBitrateTrack _) => RebuildBitrateDropdown();
         private void HandleActiveAudioTrackChanged(BasisAudioTrack _) => RebuildAudioTrackDropdown();
+        // A failed track fetch reverts the selection player-side; rebuilding
+        // snaps the dropdown back to the row that's actually in effect.
+        private void HandleActiveSubtitleTrackChanged(int _) => RebuildSubtitleDropdown();
+
+        private void HandleActiveMetadataChanged(BasisMediaMetadata meta)
+        {
+            _metaTitle = meta?.Title;
+            _metaUploader = meta?.Uploader;
+            _lastStatusMarkup = null;   /* force the next status repaint */
+            // Subtitle tracks arrive as metadata enrichment (resolver), so this
+            // is where the dropdown appears/disappears as loads come and go.
+            RebuildSubtitleDropdown();
+        }
 
         private void ApplyActivePlayerToControls()
         {
+            _seekPendingAt = -1f;   /* a drag on the previous player dies with it */
+            _seekAwaitUntil = -1f;
             bool canControl = HasControlPermission();
             _controlGroup?.SetActive(canControl);
             _userGroup?.SetActive(true);
@@ -426,6 +519,7 @@ namespace Basis.BasisUI.MediaPlayer
 
             RebuildBitrateDropdown();
             RebuildAudioTrackDropdown();
+            RebuildSubtitleDropdown();
 
             if (_debugToggle != null) _debugToggle.SetValueWithoutNotify(_activePlayer.VerboseLogging);
             RefreshStatus();
@@ -471,6 +565,24 @@ namespace Basis.BasisUI.MediaPlayer
             int sel = _activePlayer.SelectedAudioTrackIndex;
             if (sel >= 0 && sel < labels.Count) _audioTrackDropdown.SetValueWithoutNotify(labels[sel]);
             _audioTrackDropdown.gameObject.SetActive(tracks.Count > 0);
+        }
+
+        private void RebuildSubtitleDropdown()
+        {
+            if (_subtitleDropdown == null || _activePlayer == null) return;
+            var tracks = _activePlayer.SubtitleTracks;
+            var labels = new List<string> { "CC (embedded)" };
+            for (int i = 0; i < tracks.Count; i++)
+            {
+                var t = tracks[i];
+                labels.Add(!string.IsNullOrEmpty(t.Label) ? t.Label
+                    : (!string.IsNullOrEmpty(t.Language) ? t.Language : $"Track {i + 1}"));
+            }
+            _subtitleDropdown.AssignEntries(labels);
+            int sel = _activePlayer.SelectedSubtitleTrackIndex;
+            int row = sel >= 0 && sel < tracks.Count ? sel + 1 : 0;
+            if (row < labels.Count) _subtitleDropdown.SetValueWithoutNotify(labels[row]);
+            ApplySubtitleDropdownVisibility(_activePlayer.CaptionsEnabled);
         }
 
         private void SetGroupsActive(bool active)
@@ -586,6 +698,16 @@ namespace Basis.BasisUI.MediaPlayer
         {
             _captionTextOpacitySlider?.gameObject.SetActive(visible);
             _captionBgOpacitySlider?.gameObject.SetActive(visible);
+            ApplySubtitleDropdownVisibility(visible);
+        }
+
+        private void ApplySubtitleDropdownVisibility(bool captionsOn)
+        {
+            if (_subtitleDropdown != null)
+            {
+                bool show = captionsOn && _activePlayer != null && _activePlayer.SubtitleTracks.Count > 0;
+                _subtitleDropdown.gameObject.SetActive(show);
+            }
             _userGroup?.ForceRebuild();
         }
 
@@ -613,7 +735,90 @@ namespace Basis.BasisUI.MediaPlayer
         private void OnPanelTick()
         {
             RefreshStatus();
+            RefreshSeekBar();
             if (_debugMode) RefreshDebugInfo();
+        }
+
+        // Keeps the scrubber in step with playback, hides it for timeline-less
+        // media, and fires a debounced seek once the user's drag comes to rest.
+        private void RefreshSeekBar()
+        {
+            if (_seekSlider == null || _activePlayer == null) return;
+
+            double durS = _activePlayer.Duration.TotalSeconds;
+            bool seekable = durS > 0.5 && HasControlPermission();
+            if (_seekSlider.gameObject.activeSelf != seekable)
+            {
+                _seekSlider.gameObject.SetActive(seekable);
+                _controlGroup?.ForceRebuild();
+            }
+            if (!seekable)
+            {
+                _seekPendingAt = -1f;
+                return;
+            }
+
+            if (_seekPendingAt >= 0f)
+            {
+                if (Time.unscaledTime - _seekPendingAt < SeekDebounceSeconds) return; /* still dragging */
+                _seekPendingAt = -1f;
+                double targetS = Mathf.Clamp(_seekPendingPct, 0f, 100f) / 100.0 * durS;
+                var target = System.TimeSpan.FromSeconds(targetS);
+                if (_activeNetworking != null) _ = _activeNetworking.Seek(target);
+                else
+                {
+                    try { _activePlayer.Seek(target); }
+                    catch (System.NotSupportedException) { }
+                }
+                // The native seek is asynchronous: hold the handle at the target
+                // until the reported position lands nearby (or give up after a
+                // refetch-worth of time), instead of tweening back to the old
+                // playhead and forward again.
+                _seekAwaitPosS = targetS;
+                _seekAwaitUntil = Time.unscaledTime + 6f;
+                return;
+            }
+
+            double posS = _activePlayer.Position.TotalSeconds;
+            if (_seekAwaitUntil > 0f)
+            {
+                bool landed = System.Math.Abs(posS - _seekAwaitPosS) < 4.0; /* keyframe granularity */
+                if (!landed && Time.unscaledTime < _seekAwaitUntil)
+                {
+                    posS = _seekAwaitPosS;
+                }
+                else
+                {
+                    _seekAwaitUntil = -1f;
+                }
+            }
+            float pct = Mathf.Clamp((float)(posS / durS * 100.0), 0f, 100f);
+            if (_seekSlider.SliderComponent != null &&
+                Mathf.Abs(_seekSlider.SliderComponent.value - pct) > 0.25f)
+            {
+                // Drive through the same uGUI path a drag takes, so the handle
+                // and fill visuals always follow; the flag keeps our writes
+                // from arming the seek debounce. Quarter-percent gate: no tween
+                // and label churn from sub-pixel moves every frame.
+                _drivingSeekSlider = true;
+                _seekSlider.SliderComponent.value = pct;
+                _drivingSeekSlider = false;
+            }
+        }
+
+        // TMP's <noparse> is not nestable: an embedded </noparse> in player- or
+        // remote-supplied text (titles ride the networking layer; error strings
+        // echo URLs) terminates the block and the remainder parses as rich text
+        // again — markup injection into the Status line. Breaking every '<' with
+        // a zero-width space renders identically and keeps any tag inert.
+        private static string SanitizeForMarkup(string s) =>
+            string.IsNullOrEmpty(s) ? s : s.Replace("<", "<\u200B");
+
+        private static string FormatTime(int totalSeconds)
+        {
+            if (totalSeconds < 0) totalSeconds = 0;
+            int h = totalSeconds / 3600, m = (totalSeconds % 3600) / 60, s = totalSeconds % 60;
+            return h > 0 ? $"{h}:{m:00}:{s:00}" : $"{m}:{s:00}";
         }
 
         // Builds the always-visible status line for the selected player: a colored
@@ -627,23 +832,42 @@ namespace Basis.BasisUI.MediaPlayer
             BasisMediaPlayerStatus status = _activePlayer.Status;
             string err = _activePlayer.LastErrorMessage;
             Vector2Int size = _activePlayer.VideoSize;
+            int posSec = (int)_activePlayer.Position.TotalSeconds;
+            int durSec = (int)_activePlayer.Duration.TotalSeconds;
+            if (durSec <= 0) posSec = -1;   /* no timeline: keep the gate quiet */
 
             // Cheap gate: rebuild the markup only when something observable changed, so
-            // a steady-state video doesn't allocate a string every frame. LastErrorMessage
-            // returns a stable reference between changes, so ReferenceEquals is enough.
-            if (status == _lastStatus && size == _lastStatusSize && ReferenceEquals(err, _lastStatusErr)) return;
+            // a steady-state video doesn't allocate a string every frame (the time line
+            // ticks it once per second while a timeline is showing). LastErrorMessage
+            // returns a stable reference between changes, so ReferenceEquals is enough;
+            // metadata changes clear _lastStatusMarkup instead.
+            if (status == _lastStatus && size == _lastStatusSize && ReferenceEquals(err, _lastStatusErr) &&
+                posSec == _lastPosSec && durSec == _lastDurSec && _lastStatusMarkup != null) return;
             _lastStatus = status;
             _lastStatusSize = size;
             _lastStatusErr = err;
+            _lastPosSec = posSec;
+            _lastDurSec = durSec;
 
             _statusBuilder.Clear();
             _statusBuilder.Append("<color=").Append(StatusColorHex(status)).Append("><b>")
                 .Append(StatusLabel(status)).Append("</b></color>");
+            if (durSec > 0)
+                _statusBuilder.Append("  <color=#9AA0A6>").Append(FormatTime(posSec))
+                    .Append(" / ").Append(FormatTime(durSec)).Append("</color>");
+
+            // What's playing, per the player's metadata (URL-derived defaults,
+            // resolver/playlist enrichment when present). Player-supplied text
+            // is sanitized AND wrapped in <noparse>, like the error strings below.
+            if (!string.IsNullOrEmpty(_metaTitle))
+                _statusBuilder.Append("\n<b><noparse>").Append(SanitizeForMarkup(_metaTitle)).Append("</noparse></b>");
+            if (!string.IsNullOrEmpty(_metaUploader))
+                _statusBuilder.Append("\n<color=#9AA0A6><noparse>").Append(SanitizeForMarkup(_metaUploader)).Append("</noparse></color>");
 
             if (status == BasisMediaPlayerStatus.Error)
             {
                 if (!string.IsNullOrEmpty(err))
-                    _statusBuilder.Append("\n<color=#E5534B><noparse>").Append(err).Append("</noparse></color>");
+                    _statusBuilder.Append("\n<color=#E5534B><noparse>").Append(SanitizeForMarkup(err)).Append("</noparse></color>");
             }
             else
             {
@@ -654,7 +878,7 @@ namespace Basis.BasisUI.MediaPlayer
                 // video still plays, so the state word stays accurate and this is
                 // surfaced as a separate amber note.
                 if (!string.IsNullOrEmpty(err))
-                    _statusBuilder.Append("\n<color=#E6C15A>Issue: <noparse>").Append(err).Append("</noparse></color>");
+                    _statusBuilder.Append("\n<color=#E6C15A>Issue: <noparse>").Append(SanitizeForMarkup(err)).Append("</noparse></color>");
             }
 
             string markup = _statusBuilder.ToString();

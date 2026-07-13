@@ -14,8 +14,10 @@ public partial class BasisLocalFootDriver
         public BasisFootPhase phase;
         public Vector3 plantedPos;
         public Quaternion plantedRot;
+        public Vector3 plantedBodyFwd;
         public Vector3 stepStartPos, stepTargetPos;
-        public Quaternion stepTargetRot;
+        /// <summary>Foot rotation frozen at lift-off; the swing blends FROM it. Mirrors stepStartPos.</summary>
+        public Quaternion stepStartRot;
         public float stepTimer, stepDur;
 
         public Vector3 idealPos, filteredNormal;

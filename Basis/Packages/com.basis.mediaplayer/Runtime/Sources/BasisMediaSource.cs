@@ -19,7 +19,7 @@ public enum BasisMediaDelivery
 //
 //   rtsp://, rtspt://     RTSP (rtspt = RTP interleaved over TCP — PC/VR low latency)
 //   rtmp://, rtmps://     RTMP / RTMP-over-TLS
-//   https://, http://     fragmented MP4 (.mp4) or MPEG-TS (.ts) over HTTP(S)
+//   https://, http://     fragmented MP4 (.mp4), MPEG-TS (.ts) or WAV (.wav) over HTTP(S)
 //
 // The CPU IBasisFrameSource path (e.g. BasisSyntheticTestSource for tests) is
 // entered only by assigning BasisMediaPlayer.Source directly. Disallowed schemes
@@ -78,6 +78,12 @@ public sealed class BasisMediaSource
     // hardware decoding hints). The player passes this through to the resolved
     // source; unknown keys are ignored.
     public Dictionary<string, object> Options;
+
+    // Optional display metadata carried with the source. A resolver that knows
+    // the real title/uploader sets this before handing the source to LoadSource,
+    // with Metadata.SourceUrl set to the input/page URL it resolved. Null means
+    // the player derives URL-based defaults at load.
+    public BasisMediaMetadata Metadata;
 
     public static BasisMediaSource FromUrl(string url) => new BasisMediaSource(url);
     public static BasisMediaSource FromLocalPath(string path) => new BasisMediaSource(NormalizeLocalPath(path));

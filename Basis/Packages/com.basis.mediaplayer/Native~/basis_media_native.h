@@ -67,7 +67,8 @@ typedef enum basis_render_op {
  * Returns NULL only on allocation failure or an unrecognised scheme; transport
  * failures surface asynchronously via basis_media_get_state / get_last_error.
  * Supported schemes: rtsp://, rtspt://, rtmp://, rtmps://, http://, https://
- * (the last two are demuxed by extension: .ts = MPEG-TS, .mp4 = fragmented MP4). */
+ * (the last two pick a demuxer by content sniff — MPEG-TS, fMP4/progressive MP4
+ * or RIFF/WAV — with the URL extension as fallback). */
 BASIS_API basis_media_engine_t* BASIS_CALL basis_media_open(const char* url);
 
 /* Split-stream / paced open. video_url carries video (e.g. an H.264-only fMP4);
@@ -121,6 +122,21 @@ BASIS_API int BASIS_CALL basis_media_get_frame_origin(basis_media_engine_t* engi
  * microseconds from stream start. -1 if unknown. */
 BASIS_API int64_t BASIS_CALL basis_media_get_position_us(basis_media_engine_t* engine);
 
+/* Total media duration in microseconds for on-demand sources whose container or
+ * playlist reveals one (progressive MP4 sample tables, HLS VOD segment totals).
+ * 0 while unknown and for live sources — a non-zero value is also the signal
+ * that the source has a seekable timeline. May become available only after the
+ * container index has been parsed, so poll rather than reading once at open. */
+BASIS_API int64_t BASIS_CALL basis_media_get_duration_us(basis_media_engine_t* engine);
+
+/* Requests an absolute seek to target_us on a source with a seekable timeline
+ * (basis_media_get_duration_us > 0; targets past the end clamp to it). Seeking
+ * is asynchronous: the demuxer repositions at the next sample boundary and
+ * playback resumes from the preceding keyframe, so the landing position is at
+ * or shortly before the target — observe basis_media_get_position_us. Returns
+ * 0 when the request was accepted, -1 when the source cannot seek. */
+BASIS_API int BASIS_CALL basis_media_seek_us(basis_media_engine_t* engine, int64_t target_us);
+
 /* Copies the in-band caption cue (CEA-608 CC1) active at the current presentation
  * position into buf (UTF-8, NUL-terminated). Returns bytes written (0 = no active
  * cue), or -1 on bad args. out_start_us/out_end_us receive the active cue's time
@@ -137,10 +153,23 @@ BASIS_API int BASIS_CALL basis_media_get_last_error(basis_media_engine_t* engine
  * in/out/blit/drop tallies) into buf. Returns bytes written. For tooling/logs. */
 BASIS_API int BASIS_CALL basis_media_get_debug(basis_media_engine_t* engine, char* buf, int buf_size);
 
+/* Copies a human-readable transport description into buf and returns bytes
+ * written. Protocols that negotiate a transport report the settled choice
+ * (RTSP: "RTSP over UDP", "RTSP over TCP", "RTSP over TCP (UDP unavailable)");
+ * everything else reports its URL scheme. Valid from open; refined when the
+ * protocol settles, so read it once playback has started. */
+BASIS_API int BASIS_CALL basis_media_get_transport(basis_media_engine_t* engine, char* buf, int buf_size);
+
 /* Jitter-buffer control. mode: 0 = fixed (use buffer_ms), 1 = dynamic (auto-tune;
  * buffer_ms is the starting value). buffer_ms is how far behind live video is
  * presented (latency vs smoothness). Safe to call any time after open. */
 BASIS_API void BASIS_CALL basis_media_set_buffer(basis_media_engine_t* engine, int mode, int buffer_ms);
+
+/* Reports the managed audio sink's measured output latency (microseconds). The
+ * backend paces video presentation this far behind live so audio and video land
+ * together; smaller values mean lower end-to-end latency. Backends that time
+ * audio internally (desktop) ignore it. Safe to call any time after open. */
+BASIS_API void BASIS_CALL basis_media_set_audio_latency(basis_media_engine_t* engine, int latency_us);
 
 /* ---- Zero-copy video ---------------------------------------------------- */
 

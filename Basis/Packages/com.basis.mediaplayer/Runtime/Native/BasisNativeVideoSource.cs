@@ -75,9 +75,23 @@ public sealed class BasisNativeVideoSource : IBasisPcmSource, IDisposable
     // PTS (microseconds) of the most recently published frame; -1 until known.
     public long PositionUs => BasisNativeMedia.GetPositionUs(handle);
 
+    // Total media duration (microseconds) once the container index has been
+    // parsed; 0 for live/unknown — 0 also means the source can't seek.
+    public long DurationUs => BasisNativeMedia.GetDurationUs(handle);
+
+    // Requests an asynchronous absolute seek; lands at or shortly before the
+    // target (preceding keyframe / segment boundary). False when the source
+    // has no seekable timeline.
+    public bool SeekUs(long targetUs) => BasisNativeMedia.SeekUs(handle, targetUs);
+
     // One-line native counter string (blit/copy/lag/buf/nodue/acq/audio). For the
     // debug window / diagnostics.
     public string DebugInfo => handle != IntPtr.Zero ? BasisNativeMedia.GetDebug(handle) : null;
+
+    // Human-readable transport: negotiated detail where the protocol reports one
+    // ("RTSP over UDP", "RTSP over TCP (UDP unavailable)"), the URL scheme
+    // otherwise. Settles once playback starts; null on binaries without the export.
+    public string Transport => handle != IntPtr.Zero ? BasisNativeMedia.GetTransport(handle) : null;
 
     // Monotonic count of frames decoded + written to the ring (for fps readouts).
     public ulong DecodedFrameCount => BasisNativeMedia.GetFrameCounter(handle);
@@ -98,6 +112,7 @@ public sealed class BasisNativeVideoSource : IBasisPcmSource, IDisposable
     private bool readyFired;
     private bool eosRaised;
     private bool errorRaised;
+    private string loggedTransport;
 
     // Desired jitter buffer; applied to the native engine on Start and on change.
     private int bufferMode = (int)BasisVideoBufferMode.Dynamic;
@@ -160,6 +175,7 @@ public sealed class BasisNativeVideoSource : IBasisPcmSource, IDisposable
         BasisNativeMedia.SetBuffer(handle, bufferMode, bufferMs);
         started = true;
         readyFired = eosRaised = errorRaised = false;
+        loggedTransport = null;
         lastFrameCounter = 0;
         lastTexturePtr = IntPtr.Zero;
         // Re-arm caption polling for the new native handle: clear the dedup state so
@@ -176,6 +192,14 @@ public sealed class BasisNativeVideoSource : IBasisPcmSource, IDisposable
         bufferMode = (int)mode;
         if (ms > 0) bufferMs = ms;
         if (handle != IntPtr.Zero) BasisNativeMedia.SetBuffer(handle, bufferMode, bufferMs);
+    }
+
+    // Reports the audio sink's measured output latency so the native backend paces
+    // video to match it (the low-latency A/V sync path; desktop self-times and
+    // ignores it). Called each frame by the player from the audio component.
+    public void SetAudioLatencyUs(long latencyUs)
+    {
+        if (handle != IntPtr.Zero) BasisNativeMedia.SetAudioLatencyUs(handle, (int)latencyUs);
     }
 
     public void Play() { if (handle != IntPtr.Zero) BasisNativeMedia.Play(handle); }
@@ -297,6 +321,20 @@ public sealed class BasisNativeVideoSource : IBasisPcmSource, IDisposable
             case BasisNativeMedia.State.Ended when !eosRaised:
                 eosRaised = true;
                 OnEndOfStream?.Invoke();
+                break;
+            case BasisNativeMedia.State.Playing when (pumpCount % 30) == 0:
+                // Logs which transport the connection settled on (RTSP
+                // negotiates UDP vs TCP), and again if it changes (a mid-play
+                // fallback restarts the session over TCP). Checked on a ~0.5 s
+                // cadence rather than every pump so the marshalling cost stays
+                // off the per-frame path regardless of what the native binary
+                // returns; stub-platform binaries return null and never log.
+                string transport = Transport;
+                if (!string.IsNullOrEmpty(transport) && transport != loggedTransport)
+                {
+                    loggedTransport = transport;
+                    BasisDebug.Log($"[NativeMedia] transport: {transport}", BasisDebug.LogTag.Video);
+                }
                 break;
         }
 

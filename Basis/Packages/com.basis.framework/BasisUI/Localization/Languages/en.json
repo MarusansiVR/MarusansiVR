@@ -43,6 +43,14 @@
       "value": "How many times per second your avatar pose is sent to peers."
     },
     {
+      "key": "settings.general.networking.p2pVoiceBitrateOverride.tooltip",
+      "value": "Use a custom voice bitrate while a direct connection is active."
+    },
+    {
+      "key": "settings.general.networking.p2pVoiceBitrate.tooltip",
+      "value": "Higher = better voice quality and more bandwidth."
+    },
+    {
       "key": "settings.audio.masterVolume.tooltip",
       "value": "Overall loudness of all sound in the app."
     },
@@ -377,6 +385,10 @@
     {
       "key": "settings.developer.interactionHover.tooltip",
       "value": "Show interaction hover spheres and lines to hovered objects."
+    },
+    {
+      "key": "settings.developer.fingerTouch.tooltip",
+      "value": "Show the fingertip touch sphere in VR. Gray when idle, yellow while hovering, green while pressing."
     },
     {
       "key": "settings.developer.seatTargets.tooltip",
@@ -1563,6 +1575,14 @@
       "value": "How much extra voice data is sent to recover from packet loss."
     },
     {
+      "key": "settings.admin.opusBitrate.override.tooltip",
+      "value": "Force a voice bitrate on every player's encoder."
+    },
+    {
+      "key": "settings.admin.opusBitrate.tooltip",
+      "value": "Voice bitrate every player transmits with while the override is on."
+    },
+    {
       "key": "settings.admin.maxMicrophoneRange.tooltip",
       "value": "Cap how far any player's voice can transmit, in metres."
     },
@@ -1959,8 +1979,64 @@
       "value": "({0})"
     },
     {
+      "key": "trackerLinking.pair.title",
+      "value": "Linked pair"
+    },
+    {
+      "key": "trackerLinking.unlink",
+      "value": "Unlink"
+    },
+    {
+      "key": "trackerLinking.unlink.tooltip",
+      "value": "Break this pair. Both trackers go back to being calibrated on their own. Recalibrate afterwards."
+    },
+    {
+      "key": "trackerLinking.roleOverridePair.tooltip",
+      "value": "Lock the pair's fused midpoint to a body role. Auto lets calibration choose."
+    },
+    {
+      "key": "trackerLinking.status.driving",
+      "value": "Driving {0}"
+    },
+    {
+      "key": "trackerLinking.status.unassigned",
+      "value": "No role yet — run full-body calibration"
+    },
+    {
+      "key": "trackerLinking.status.pairDriving",
+      "value": "Fused — driving {0}"
+    },
+    {
+      "key": "trackerLinking.status.pairUncalibrated",
+      "value": "Fused — run full-body calibration to give the pair a role"
+    },
+    {
+      "key": "trackerLinking.status.pairPending",
+      "value": "Linked, waiting for the merged tracker to come up"
+    },
+    {
+      "key": "trackerLinking.status.partnerOffline",
+      "value": "Linked to a tracker that isn't connected — reconnect it, or unlink"
+    },
+    {
       "key": "trackerLinking.trackers.title",
       "value": "Connected Trackers"
+    },
+    {
+      "key": "trackerLinking.trustSteamVRRoles",
+      "value": "Trust SteamVR Tracker Roles"
+    },
+    {
+      "key": "trackerLinking.trustSteamVRRoles.tooltip",
+      "value": "Also bind trackers using the body-part roles assigned by hand in SteamVR settings. Only enable this if you actually set those roles yourself."
+    },
+    {
+      "key": "trackerLinking.continuousCalibration",
+      "value": "Continuous Calibration"
+    },
+    {
+      "key": "trackerLinking.continuousCalibration.tooltip",
+      "value": "While you stand still in your calibration pose, small tracker strap slips are slowly absorbed into the current calibration (position only, capped at 5 cm). Large drift is never auto-corrected — recalibrate instead."
     },
     {
       "key": "trackerLinking.connectorTrackers",
@@ -2101,6 +2177,10 @@
     {
       "key": "calibration.calibrating",
       "value": "Calibrating"
+    },
+    {
+      "key": "calibration.clickToConfirm",
+      "value": "Click again to calibrate"
     },
     {
       "key": "calibration.additionalHeight",
@@ -2407,6 +2487,70 @@
       "value": "Always render this player's avatar, even when distance, the max visible avatar cap, or the view cone filter would normally replace it with the loading avatar. Blocking and the performance filter still apply."
     },
     {
+      "key": "menu.individualPlayer.voiceRecording",
+      "value": "Voice Recording"
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.description",
+      "value": "Record or re-route this player's voice. They are asked for permission and can revoke it at any time."
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.start",
+      "value": "Record Voice"
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.start.description",
+      "value": "Ask this player for permission, then record their voice to a clip on your device."
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.stop",
+      "value": "Stop Recording"
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.requesting",
+      "value": "Requesting…"
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.policy",
+      "value": "Let them record my voice"
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.policy.description",
+      "value": "Whether this player is allowed to record your voice. \"Ask each time\" prompts you on every request."
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.policy.ask",
+      "value": "Ask each time"
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.policy.allow",
+      "value": "Always allow"
+    },
+    {
+      "key": "menu.individualPlayer.voiceRecording.policy.deny",
+      "value": "Always deny"
+    },
+    {
+      "key": "menu.voiceRecording.consent.title",
+      "value": "Voice Recording Request"
+    },
+    {
+      "key": "menu.voiceRecording.consent.body",
+      "value": "{0} wants to record your voice. They will be able to capture and re-play it while you allow this. Allow?"
+    },
+    {
+      "key": "menu.voiceRecording.consent.body.route",
+      "value": "A world in this instance (via {0}) wants to play your voice from an object so people nearby hear it come from there. Allow?"
+    },
+    {
+      "key": "menu.voiceRecording.consent.allow",
+      "value": "Allow"
+    },
+    {
+      "key": "menu.voiceRecording.consent.deny",
+      "value": "Deny"
+    },
+    {
       "key": "menu.individualPlayer.enableInteractions",
       "value": "Enable Interactions"
     },
@@ -2521,6 +2665,18 @@
     {
       "key": "menu.individualPlayer.directConnection.failed",
       "value": "<color=#ff5252>Direct Connection Failed</color>"
+    },
+    {
+      "key": "menu.individualPlayer.directConnection.partial",
+      "value": "Direct Connection: <color=#ff9100>Partial</color> <size=55%>(using server)</size>"
+    },
+    {
+      "key": "menu.individualPlayer.directConnection.partial.description",
+      "value": "The direct link degraded or one side couldn't connect. Voice and avatar are going through the server for now — tap Try Again to re-establish the direct link."
+    },
+    {
+      "key": "menu.individualPlayer.directConnection.tryAgain",
+      "value": "Try Again"
     },
     {
       "key": "menu.individualPlayer.directConnection.playerDisconnected",
@@ -3531,6 +3687,142 @@
       "value": "Ignore VR auto-hold on pickups, so you must keep holding the grab button to carry them."
     },
     {
+      "key": "settings.general.uiHaptics",
+      "value": "UI Haptics"
+    },
+    {
+      "key": "settings.general.uiHaptics.tooltip",
+      "value": "Vibrate the controller when the pointer hovers over and clicks menu elements."
+    },
+    {
+      "key": "settings.general.disableVRFingerTouch",
+      "value": "Disable VR Finger Touch"
+    },
+    {
+      "key": "settings.general.disableVRFingerTouch.tooltip",
+      "value": "Stop your index fingertip from hovering and pressing menus in VR. You can still point and click with the controller laser."
+    },
+    {
+      "key": "settings.general.disableVRFingerTouch.description",
+      "value": "Prevent direct fingertip presses on VR menus, so UI only responds to the laser pointer."
+    },
+    {
+      "key": "settings.general.fingerTouch.title",
+      "value": "VR Finger Touch"
+    },
+    {
+      "key": "settings.general.fingerTouch.finger",
+      "value": "Touch Finger"
+    },
+    {
+      "key": "settings.general.fingerTouch.finger.tooltip",
+      "value": "Which finger presses menus in VR. Falls back to the index finger if the avatar is missing the chosen finger."
+    },
+    {
+      "key": "settings.general.fingerTouch.finger.index",
+      "value": "Index"
+    },
+    {
+      "key": "settings.general.fingerTouch.finger.thumb",
+      "value": "Thumb"
+    },
+    {
+      "key": "settings.general.fingerTouch.finger.middle",
+      "value": "Middle"
+    },
+    {
+      "key": "settings.general.fingerTouch.finger.ring",
+      "value": "Ring"
+    },
+    {
+      "key": "settings.general.fingerTouch.finger.little",
+      "value": "Little"
+    },
+    {
+      "key": "settings.general.fingerTouch.hands",
+      "value": "Touch Hands"
+    },
+    {
+      "key": "settings.general.fingerTouch.hands.tooltip",
+      "value": "Limit finger touch to one hand, or allow both."
+    },
+    {
+      "key": "settings.general.fingerTouch.hands.both",
+      "value": "Both"
+    },
+    {
+      "key": "settings.general.fingerTouch.hands.left",
+      "value": "Left"
+    },
+    {
+      "key": "settings.general.fingerTouch.hands.right",
+      "value": "Right"
+    },
+    {
+      "key": "settings.general.fingerTouch.tipOffset",
+      "value": "Fingertip Offset"
+    },
+    {
+      "key": "settings.general.fingerTouch.tipOffset.tooltip",
+      "value": "How far past the last finger bone the touch point sits."
+    },
+    {
+      "key": "settings.general.fingerTouch.fingerLength",
+      "value": "Fallback Finger Length"
+    },
+    {
+      "key": "settings.general.fingerTouch.fingerLength.tooltip",
+      "value": "Distance from the hand to the touch point when the avatar has no finger bones."
+    },
+    {
+      "key": "settings.general.fingerTouch.radius",
+      "value": "Touch Radius"
+    },
+    {
+      "key": "settings.general.fingerTouch.radius.tooltip",
+      "value": "Size of the fingertip touch sphere. Bigger is easier to hit, smaller is more precise."
+    },
+    {
+      "key": "settings.general.fingerTouch.hoverDistance",
+      "value": "Hover Distance"
+    },
+    {
+      "key": "settings.general.fingerTouch.hoverDistance.tooltip",
+      "value": "How close the fingertip must get to a menu before hovering starts."
+    },
+    {
+      "key": "settings.general.fingerTouch.pressDepth",
+      "value": "Press Distance"
+    },
+    {
+      "key": "settings.general.fingerTouch.pressDepth.tooltip",
+      "value": "How close to the surface the fingertip must get to press."
+    },
+    {
+      "key": "settings.general.fingerTouch.releaseDistance",
+      "value": "Release Distance"
+    },
+    {
+      "key": "settings.general.fingerTouch.releaseDistance.tooltip",
+      "value": "How far the fingertip must pull back to release a press."
+    },
+    {
+      "key": "settings.general.fingerTouch.scrollSensitivity",
+      "value": "Scroll Sensitivity"
+    },
+    {
+      "key": "settings.general.fingerTouch.scrollSensitivity.tooltip",
+      "value": "How fast dragging your fingertip scrolls content."
+    },
+    {
+      "key": "settings.general.fingerTouch.haptics",
+      "value": "Touch Haptics"
+    },
+    {
+      "key": "settings.general.fingerTouch.haptics.tooltip",
+      "value": "Vibrate the controller when the fingertip hovers, presses, and clicks."
+    },
+    {
       "key": "settings.general.hud.title",
       "value": "HUD"
     },
@@ -3625,6 +3917,18 @@
     {
       "key": "settings.general.networking.p2pAvatarRate.description",
       "value": "Updates per second to direct peers - capped by your framerate."
+    },
+    {
+      "key": "settings.general.networking.p2pVoiceBitrateOverride",
+      "value": "Override Voice Bitrate"
+    },
+    {
+      "key": "settings.general.networking.p2pVoiceBitrate",
+      "value": "Voice Bitrate"
+    },
+    {
+      "key": "settings.general.networking.p2pVoiceBitrate.description",
+      "value": "Voice bitrate (bps) used while a direct connection is active. Server overrides still win."
     },
     {
       "key": "settings.general.networking.p2pAvatarRate.fpsWarning",
@@ -3741,6 +4045,58 @@
     {
       "key": "settings.audio.propVolume",
       "value": "Prop Volume"
+    },
+    {
+      "key": "settings.audio.sounds.title",
+      "value": "Interface Sounds"
+    },
+    {
+      "key": "settings.audio.sounds.hover",
+      "value": "Hover Sound"
+    },
+    {
+      "key": "settings.audio.sounds.hover.tooltip",
+      "value": "Play a soft tick when the pointer passes over a menu element."
+    },
+    {
+      "key": "settings.audio.sounds.press",
+      "value": "Click Sound"
+    },
+    {
+      "key": "settings.audio.sounds.press.tooltip",
+      "value": "Play a click when you activate a menu element."
+    },
+    {
+      "key": "settings.audio.sounds.grab",
+      "value": "Pickup Sound"
+    },
+    {
+      "key": "settings.audio.sounds.grab.tooltip",
+      "value": "Play a sound when you pick an object up. Off by default."
+    },
+    {
+      "key": "settings.audio.sounds.chat",
+      "value": "Chat Message Sound"
+    },
+    {
+      "key": "settings.audio.sounds.chat.tooltip",
+      "value": "Play a soft notification when another player sends a text message."
+    },
+    {
+      "key": "settings.audio.sounds.microphone",
+      "value": "Microphone Mute Sound"
+    },
+    {
+      "key": "settings.audio.sounds.microphone.tooltip",
+      "value": "Play a sound when you mute or unmute your microphone."
+    },
+    {
+      "key": "settings.audio.sounds.camera",
+      "value": "Camera Sounds"
+    },
+    {
+      "key": "settings.audio.sounds.camera.tooltip",
+      "value": "Play the shutter and countdown ticks when a photo is taken."
     },
     {
       "key": "settings.microphone.group.title",
@@ -5308,7 +5664,7 @@
     },
     {
       "key": "settings.bodyTracking.smoothingStrength.title",
-      "value": "work"
+      "value": "Smoothing Strength"
     },
     {
       "key": "settings.bodyTracking.smoothingStrength.description",
@@ -5943,6 +6299,10 @@
       "value": "Interaction Hover"
     },
     {
+      "key": "settings.developer.fingerTouch",
+      "value": "Finger Touch"
+    },
+    {
       "key": "settings.developer.seatTargets",
       "value": "Seat Targets"
     },
@@ -6247,12 +6607,16 @@
       "value": "Lowest severity that is allowed through BasisDebug. All emits logs, warnings, and errors. Warnings & Errors hides plain logs. Errors Only hides logs and warnings."
     },
     {
-      "key": "settings.developer.sections.title",
-      "value": "Developer Sections"
+      "key": "settings.developer.options.title",
+      "value": "Developer Options"
     },
     {
-      "key": "settings.developer.sections.description",
-      "value": "Toggle which developer sections are visible below."
+      "key": "settings.developer.alwaysShowCalibration",
+      "value": "Always Show Calibrate Button"
+    },
+    {
+      "key": "settings.developer.alwaysShowCalibration.tooltip",
+      "value": "Show the Calibrate button in every mode, including desktop. Normally it only appears in VR, or in desktop when full body tracking is on and a real body tracker is connected. Calibrating on desktop still recaptures your height and rescales the avatar."
     },
     {
       "key": "settings.developer.buildInfo",
@@ -7395,6 +7759,10 @@
       "value": "Seated Mode"
     },
     {
+      "key": "settings.bodyTracking.ikMode.auto",
+      "value": "Auto"
+    },
+    {
       "key": "settings.bodyTracking.ikMode.eyeHeight",
       "value": "Eye Height"
     },
@@ -7585,6 +7953,14 @@
     {
       "key": "settings.admin.opusFecLoss",
       "value": "Opus FEC loss %"
+    },
+    {
+      "key": "settings.admin.opusBitrate.override",
+      "value": "Override Voice Bitrate"
+    },
+    {
+      "key": "settings.admin.opusBitrate",
+      "value": "Voice Bitrate (bps)"
     },
     {
       "key": "settings.admin.maxMicrophoneRange",
@@ -7849,6 +8225,38 @@
     {
       "key": "settings.ra.title.voiceBuffer",
       "value": "Voice Buffer"
+    },
+    {
+      "key": "settings.bodyTracking.section.headSwing.title",
+      "value": "Desktop Head Carry"
+    },
+    {
+      "key": "settings.bodyTracking.section.headSwing.description",
+      "value": "Desktop only. Your head pivots at the base of your neck, not at itself, so looking down carries your eyes forward - out over your feet. In VR the headset does this on its own because it physically rides that same lever arm. Desktop used to pin the camera above the hips, so the gaze tipped, the chest hunched to follow, and the head never actually went anywhere."
+    },
+    {
+      "key": "settings.bodyTracking.headSwing.enabled.title",
+      "value": "Carry the head when looking up/down"
+    },
+    {
+      "key": "settings.bodyTracking.headSwing.enabled.description",
+      "value": "Moves the camera forward as you look down and back as you look up, by the amount your avatar's own neck geometry says it should. Turn this off to pin the camera over the hips as it was before."
+    },
+    {
+      "key": "settings.bodyTracking.headSwing.strength",
+      "value": "Carry Strength"
+    },
+    {
+      "key": "settings.bodyTracking.headSwing.strength.tooltip",
+      "value": "1.0 is the full swing implied by your avatar's neck-to-eye distance. Lower it if the camera travel feels like too much; 0 disables the carry entirely."
+    },
+    {
+      "key": "settings.bodyTracking.headSwing.backward",
+      "value": "Look-Up Carry"
+    },
+    {
+      "key": "settings.bodyTracking.headSwing.backward.tooltip",
+      "value": "How far the camera pulls back when you look UP, as a fraction of the look-down carry. Looking up is not the mirror of looking down - your upper back takes most of it, so your skull does not slide backward nearly as far. 1.0 would treat them the same."
     }
   ]
 }

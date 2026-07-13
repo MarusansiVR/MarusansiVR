@@ -207,7 +207,7 @@ namespace Basis.Scripts.Animator_Driver
         /// </remarks>
         public void SimulateAnimator(float DeltaTime)
         {
-            if (BasisLocalAvatarDriver.CurrentlyTposing || BasisAvatarIKStageCalibration.HasFBIKTrackers || PauseAnimator)
+            if (BasisLocalAvatarDriver.CurrentlyTposing || BasisAvatarIKStageCalibration.HasLegFBIKTrackers || PauseAnimator)
             {
                 StopAllVariables();
                 return;
@@ -296,7 +296,10 @@ namespace Basis.Scripts.Animator_Driver
         /// </summary>
         private void JustJumped()
         {
-            if (BasisAvatarIKStageCalibration.HasFBIKTrackers && Basis.BasisUI.BasisSettingsDefaults.DisableAnimationsInFBT.RawValue)
+            // LEG trackers, not ANY tracker: the jump animation poses the LEGS, so only a leg tracker has standing
+            // to veto it. A chest/shoulder/elbow tracker (MediaPipe spawns all three) would otherwise silence the
+            // jump animation while leaving nothing to drive the legs.
+            if (BasisAvatarIKStageCalibration.HasLegFBIKTrackers && Basis.BasisUI.BasisSettingsDefaults.DisableAnimationsInFBT.RawValue)
             {
                 return;
             }
@@ -309,7 +312,8 @@ namespace Basis.Scripts.Animator_Driver
         /// </summary>
         private void JustLanded()
         {
-            if (BasisAvatarIKStageCalibration.HasFBIKTrackers && Basis.BasisUI.BasisSettingsDefaults.DisableAnimationsInFBT.RawValue)
+            // As JustJumped: the landing animation poses the LEGS, so only a leg tracker gets to veto it.
+            if (BasisAvatarIKStageCalibration.HasLegFBIKTrackers && Basis.BasisUI.BasisSettingsDefaults.DisableAnimationsInFBT.RawValue)
             {
                 return;
             }

@@ -9,7 +9,7 @@ using UnityEngine.Animations.Rigging;
 
 public class SMModuleCalibration : BasisSettingsBase
 {
-    public static BasisSelectedHeightMode HeightMode = BasisSelectedHeightMode.EyeHeight;
+    public static BasisSelectedHeightMode HeightMode = BasisSelectedHeightMode.Auto;
     public static BasisIKLockMode CurrentIKLockMode = BasisIKLockMode.LockBoth;
     public static bool ApplyCustomScale = false;
     public static float SelectedScale = 1.6f;
@@ -154,7 +154,6 @@ public class SMModuleCalibration : BasisSettingsBase
     private static string K_FBIK_COLLISIONS_ENABLED => BasisSettingsDefaults.FBIKCollisionsEnabled.BindingKey;
     private static string K_FBIK_PROTECT_ELBOW => BasisSettingsDefaults.FBIKProtectElbow.BindingKey;
     private static string K_FBIK_COLLIDE_TRACKED_ELBOW => BasisSettingsDefaults.FBIKCollideTrackedElbow.BindingKey;
-    private static string K_FBIK_USE_HAND_CAPSULE => BasisSettingsDefaults.FBIKUseHandCapsule.BindingKey;
     private static string K_FBIK_CHEST_RADIUS => BasisSettingsDefaults.FBIKChestRadius.BindingKey;
     private static string K_FBIK_COLLISION_SKIN => BasisSettingsDefaults.FBIKCollisionSkin.BindingKey;
     private static string K_FBIK_HAND_RADIUS => BasisSettingsDefaults.FBIKHandRadius.BindingKey;
@@ -163,10 +162,7 @@ public class SMModuleCalibration : BasisSettingsBase
     private static string K_FBIK_SHOULDER_ELEVATION => BasisSettingsDefaults.FBIKShoulderElevation.BindingKey;
     private static string K_FBIK_SHOULDER_PROTRACTION => BasisSettingsDefaults.FBIKShoulderProtraction.BindingKey;
     private static string K_FBIK_MAX_BEND_DEG => BasisSettingsDefaults.FBIKMaxBendDeg.BindingKey;
-    private static string K_FBIK_STRUGGLE_START => BasisSettingsDefaults.FBIKStruggleStart.BindingKey;
-    private static string K_FBIK_STRUGGLE_END => BasisSettingsDefaults.FBIKStruggleEnd.BindingKey;
     private static string K_FBIK_MAX_CHEST_DELTA => BasisSettingsDefaults.FBIKMaxChestDelta.BindingKey;
-    private static string K_FBIK_MAX_HIP_DELTA => BasisSettingsDefaults.FBIKMaxHipDelta.BindingKey;
 
     // Calibration sphere scale keys
     private static string K_CALIB_HIPS => BasisSettingsDefaults.CalibSphereScaleHips.BindingKey;
@@ -225,6 +221,13 @@ public class SMModuleCalibration : BasisSettingsBase
                         case "arm distance":
                             BasisDebug.Log($"Height Mode Set To {optionValue}");
                             HeightMode = BasisDeviceManagement.IsUserInDesktop() ? BasisSelectedHeightMode.EyeHeight : BasisSelectedHeightMode.ArmSpan;
+                            break;
+
+                        case "auto":
+                            BasisDebug.Log($"Height Mode Set To {optionValue}");
+                            // Stored as Auto; BasisHeightDriver.ResolveHeightMode picks the concrete
+                            // metric pair per avatar (and forces EyeHeight on desktop).
+                            HeightMode = BasisSelectedHeightMode.Auto;
                             break;
                     }
 
@@ -620,10 +623,6 @@ public class SMModuleCalibration : BasisSettingsBase
                 if (bool.TryParse(optionValue, out var cteVal)) ApplyIKDataBool((ref BasisFullBodyData d) => d.CollideTrackedElbow = cteVal);
                 break;
 
-            case var s when s == K_FBIK_USE_HAND_CAPSULE:
-                if (bool.TryParse(optionValue, out var hcVal)) ApplyIKDataBool((ref BasisFullBodyData d) => d.UseHandCapsule = hcVal);
-                break;
-
             case var s when s == K_FBIK_CHEST_RADIUS:
                 if (SliderReadOption(optionValue, out var crVal)) ApplyIKDataFloat((ref BasisFullBodyData d) => d.ChestRadius = crVal);
                 break;
@@ -656,20 +655,8 @@ public class SMModuleCalibration : BasisSettingsBase
                 if (SliderReadOption(optionValue, out var mbVal)) ApplyIKDataFloat((ref BasisFullBodyData d) => d.MaxBendDeg = mbVal);
                 break;
 
-            case var s when s == K_FBIK_STRUGGLE_START:
-                if (SliderReadOption(optionValue, out var ssStartVal)) ApplyIKDataFloat((ref BasisFullBodyData d) => d.StruggleStart = ssStartVal);
-                break;
-
-            case var s when s == K_FBIK_STRUGGLE_END:
-                if (SliderReadOption(optionValue, out var ssEndVal)) ApplyIKDataFloat((ref BasisFullBodyData d) => d.StruggleEnd = ssEndVal);
-                break;
-
             case var s when s == K_FBIK_MAX_CHEST_DELTA:
                 if (SliderReadOption(optionValue, out var mcdVal)) ApplyIKDataFloat((ref BasisFullBodyData d) => d.MaxChestDelta = mcdVal);
-                break;
-
-            case var s when s == K_FBIK_MAX_HIP_DELTA:
-                if (SliderReadOption(optionValue, out var mhdVal)) ApplyIKDataFloat((ref BasisFullBodyData d) => d.MaxHipDelta = mhdVal);
                 break;
 
             // ---------- CALIBRATION SPHERE SCALE ----------
@@ -684,7 +671,6 @@ public class SMModuleCalibration : BasisSettingsBase
                 }
                 break;
         }
-        BasisLocalPlayer.Instance.LocalRigDriver.UpdateEuroSettings();
     }
 
     public override void ChangedSettings()

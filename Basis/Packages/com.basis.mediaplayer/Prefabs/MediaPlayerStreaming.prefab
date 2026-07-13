@@ -11,6 +11,7 @@ GameObject:
   - component: {fileID: 6131995112271174821}
   - component: {fileID: 8784094859471152664}
   - component: {fileID: 1211907220076742265}
+  - component: {fileID: 8776084679173940995}
   m_Layer: 0
   m_Name: CaptionText
   m_TagString: Untagged
@@ -109,7 +110,7 @@ MonoBehaviour:
   m_lineSpacingMax: 0
   m_paragraphSpacing: 0
   m_charWidthMaxAdj: 0
-  m_TextWrappingMode: 0
+  m_TextWrappingMode: 1
   m_wordWrappingRatios: 0.4
   m_overflowMode: 0
   m_linkedTextComponent: {fileID: 0}
@@ -137,6 +138,26 @@ MonoBehaviour:
   m_hasFontAssetChanged: 0
   m_baseMaterial: {fileID: 0}
   m_maskOffset: {x: 0, y: 0, z: 0, w: 0}
+--- !u!114 &8776084679173940995
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 199438153068521520}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 306cc8c2b49d7114eaa3623786fc2126, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: UnityEngine.UI::UnityEngine.UI.LayoutElement
+  m_IgnoreLayout: 0
+  m_MinWidth: -1
+  m_MinHeight: -1
+  m_PreferredWidth: 1200
+  m_PreferredHeight: -1
+  m_FlexibleWidth: -1
+  m_FlexibleHeight: -1
+  m_LayoutPriority: 1
 --- !u!1 &2594933269337210058
 GameObject:
   m_ObjectHideFlags: 0
@@ -383,7 +404,7 @@ AudioSource:
   m_Pitch: 1
   Loop: 0
   Mute: 0
-  Spatialize: 0
+  Spatialize: 1
   SpatializePostEffects: 0
   Priority: 128
   DopplerLevel: 1
@@ -764,13 +785,14 @@ MonoBehaviour:
   MaterialIndex: 0
   TexturePropertyName: _BaseMap
   UseSharedMaterial: 0
+  AdditionalTargets: []
   PlaceholderTexture: {fileID: 2800000, guid: 93f0d4f9be07b5e4094ac46f24473eb1, type: 3}
   RestorePlaceholderOnEnded: 1
   FlipVertically: 0
   FlipHorizontally: 0
   ProjectionMode: 0
   StereoEye: 0
-  AspectMode: 0
+  AspectMode: 2
   DisplayAspectOverride: 0
 --- !u!114 &5505517674190816405
 MonoBehaviour:
@@ -791,6 +813,7 @@ MonoBehaviour:
   AdminOnly: 0
   AllowAnyoneToTakeControl: 1
   DriftSeekThresholdSeconds: 0
+  PositionHeartbeatSeconds: 5
   VerboseLogging: 0
 --- !u!114 &4061480472500249022
 MonoBehaviour:
@@ -805,8 +828,8 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: BasisSDK::BasisProp
   BasisBundleDescription:
-    AssetBundleName: BasisMediaPlayer
-    AssetBundleDescription: 0.02 Made by the basis team
+    AssetBundleName: Basis Media Player
+    AssetBundleDescription: 0.1.0 Made by the Basis team
     AssetBundleIcon: {fileID: 0}
     Tags:
     - MediaPlayer
@@ -849,6 +872,7 @@ MonoBehaviour:
   KinematicWhileInteracting: 1
   CanSelfSteal: 1
   LerpToHandOnPickup: 1
+  WeldToHand: 1
   ShowHighlightOnHover: 1
   DesktopRotateSpeed: 0.1
   DesktopZoopSpeed: 0.2
@@ -932,37 +956,100 @@ MonoBehaviour:
   IsOwnedLocallyOnServer: 0
   IsOwnedLocallyOnClient: 0
   CurrentOwnerId: 0
-  BasisPickupInteractable: {fileID: 0}
+  SendIntervalSeconds: 0.05
+  KeyframeIntervalSeconds: 0.5
+  ContinuousEpsilon: 0.0001
+  RotationSendThresholdDegrees: 0.5
+  UseDirectP2P: 1
+  ForceP2POnly: 0
+  OverrideP2PRate: 0
+  P2PSendIntervalSeconds: 0.033
+  P2PKeyframeIntervalSeconds: 0.5
+  Delivery: 4
+  KeyframeDelivery: 2
+  Extrapolate: 0
+  MaxExtrapolationSeconds: 0.2
+  JitterBufferDepth: 2
+  UseTeleportThreshold: 0
+  TeleportThreshold: 3
+  DistanceReduction: 1
+  RelevanceCulling: 0
+  RelevanceRadius: 50
+  UseChecksum: 1
+  _serializedVersion: 3
+  Target: {fileID: 4507114126077030822}
+  SyncPosition: 1
+  PositionX: 1
+  PositionY: 1
+  PositionZ: 1
+  SyncRotation: 1
+  RotationMode: 0
+  SmallestThreeBits: 9
+  RotationX: 1
+  RotationY: 1
+  RotationZ: 1
+  SyncScale: 1
+  ScaleUniform: 0
+  ScaleX: 1
+  ScaleY: 1
+  ScaleZ: 1
+  WorldSpace: 0
+  RelativeTo: {fileID: 0}
+  InterpolatePosition: 1
+  InterpolateRotation: 1
+  InterpolateScale: 1
+  PosCompX:
+    Mode: 0
+    Min: -1024
+    Max: 1024
+    Bits: 16
+  PosCompY:
+    Mode: 0
+    Min: -1024
+    Max: 1024
+    Bits: 16
+  PosCompZ:
+    Mode: 0
+    Min: -1024
+    Max: 1024
+    Bits: 16
+  RotCompX:
+    Mode: 0
+    Min: 0
+    Max: 360
+    Bits: 16
+  RotCompY:
+    Mode: 0
+    Min: 0
+    Max: 360
+    Bits: 16
+  RotCompZ:
+    Mode: 0
+    Min: 0
+    Max: 360
+    Bits: 16
+  ScaleCompX:
+    Mode: 0
+    Min: 0
+    Max: 64
+    Bits: 16
+  ScaleCompY:
+    Mode: 0
+    Min: 0
+    Max: 64
+    Bits: 16
+  ScaleCompZ:
+    Mode: 0
+    Min: 0
+    Max: 64
+    Bits: 16
+  BasisPickupInteractable: {fileID: 3404733239259574964}
   CanNetworkSteal: 1
   IsStatic: 0
-  LocalLastData:
-    x: 0
-    y: 0
-    z: 0
-    Rotation: 0
-    Scalex: 0
-    Scaley: 0
-    Scalez: 0
-  BTU:
-    TargetPosition:
-      x: 0
-      y: 0
-      z: 0
-    TargetRotation:
-      value:
-        x: 0
-        y: 0
-        z: 0
-        w: 0
-    TargetScales:
-      x: 0
-      y: 0
-      z: 0
-    LerpMultipliers: 0
   pendingStealRequest: {fileID: 0}
-  CatchupLerp: 5
-  buffer: 00000000000000000000000000000000
-  SelfTransform: {fileID: 0}
+  RemoteDeadReckon: 0
+  AttachToHandOnGrab: 1
+  FullRateWhileHeld: 1
 --- !u!54 &7733138127675236971
 Rigidbody:
   m_ObjectHideFlags: 0

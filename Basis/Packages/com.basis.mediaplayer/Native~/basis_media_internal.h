@@ -30,7 +30,9 @@ typedef enum basis_codec {
     BASIS_CODEC_H264 = 1,
     BASIS_CODEC_H265 = 2,
     BASIS_CODEC_AAC  = 10,
-    BASIS_CODEC_LPCM = 11   /* Blu-ray HDMV LPCM (TS stream_type 0x80) */
+    BASIS_CODEC_LPCM = 11   /* raw integer PCM: Blu-ray HDMV LPCM (TS stream_type
+                             * 0x80, big-endian) or RIFF/WAV (little-endian —
+                             * flags byte 3 of the announce config blob) */
 } basis_codec_t;
 
 /* Sink the demuxers push into. All callbacks are invoked from the demux thread.
@@ -47,10 +49,13 @@ typedef struct basis_media_sink {
                             const uint8_t* extradata, int extradata_len,
                             int width, int height);
 
-    /* One coded video access unit in Annex B form (start-code separated NALUs),
-     * with presentation timestamp in microseconds. key != 0 marks an IDR/keyframe. */
+    /* One coded video access unit in Annex B form (start-code separated NALUs).
+     * pts_us is the presentation timestamp; dts_us the decode timestamp, used
+     * for delivery pacing (composition offsets can put pts_us further ahead
+     * than the pacing lead — a demuxer without decode timestamps passes
+     * pts_us for both). key != 0 marks an IDR/keyframe. */
     void (*on_video_au)(void* user, const uint8_t* annexb, int len,
-                        int64_t pts_us, int key);
+                        int64_t pts_us, int64_t dts_us, int key);
 
     /* Called once when the audio codec/config is first known. For AAC, `asc` is
      * the AudioSpecificConfig (2+ bytes) when available. */
@@ -67,6 +72,23 @@ typedef struct basis_media_sink {
     void (*on_error)(void* user, const char* message);
     void (*on_end_of_stream)(void* user);
 
+    /* Total media duration once the container/playlist reveals one (VOD).
+     * Live sources never call it. May be NULL (standalone harnesses); may fire
+     * again on a reconnect re-parsing the same index. */
+    void (*on_duration)(void* user, int64_t duration_us);
+
+    /* Human-readable transport description once a protocol settles on one
+     * (e.g. "RTSP over UDP", "RTSP over TCP (UDP unavailable)"). Only
+     * protocols that negotiate call it; may be NULL. Exposed to the host via
+     * basis_media_get_transport. */
+    void (*on_transport)(void* user, const char* transport);
+
+    /* Absolute-seek handshake for on-demand sources. A demuxer that can seek
+     * polls it between samples: returns 1 and writes the target when a request
+     * is pending, 0 otherwise. Each sink hands out a request once. May be NULL
+     * (standalone harnesses, sources that never seek). */
+    int (*take_seek)(void* user, int64_t* out_target_us);
+
     /* Demuxers poll this in their read loops; return 0 to unwind and exit. */
     int (*is_running)(void* user);
 } basis_media_sink_t;
@@ -74,6 +96,12 @@ typedef struct basis_media_sink {
 /* Generic blocking byte source for demuxers that read a continuous stream
  * (MPEG-TS / fMP4 over TCP or HTTP). Returns bytes read, 0 on EOF, <0 on error. */
 typedef int (*basis_read_fn)(void* ctx, uint8_t* buf, int len);
+
+/* Repositions a byte source to an absolute offset (a ranged HTTP refetch).
+ * Returns 0 on success — subsequent reads deliver from `abs_offset`. Called by
+ * a demuxer between its own reads, on its own thread; sources that can't
+ * reposition simply aren't given one (demuxers receive NULL). */
+typedef int (*basis_reseek_fn)(void* ctx, int64_t abs_offset);
 
 /* ---- Platform decode/present backend (windows/ + android/) --------------- */
 
@@ -122,6 +150,7 @@ int      basis_decoder_get_audio_format(basis_decoder_t* dec, int* out_rate, int
 int      basis_decoder_read_audio(basis_decoder_t* dec, float* out, int max_floats); /* audio thread */
 int      basis_decoder_get_debug(basis_decoder_t* dec, char* buf, int size); /* diagnostics */
 void     basis_decoder_set_buffer(basis_decoder_t* dec, int mode, int buffer_ms); /* 0=fixed,1=dynamic */
+void     basis_decoder_set_audio_latency(basis_decoder_t* dec, int latency_us);   /* managed sink output latency, for A/V pacing */
 void     basis_decoder_set_output_texture(basis_decoder_t* dec, void* native_texture, int w, int h); /* Android: Unity-owned dst */
 
 /* ---- Engine internals shared with the platform backend ------------------ */
@@ -154,23 +183,14 @@ uint64_t basis_gfx_vk_physical_device(void);
 uint64_t basis_gfx_vk_graphics_queue(void);
 uint32_t basis_gfx_vk_graphics_queue_family(void);
 
-/* Vulkan: fetch Unity's currently-recording command buffer (so the YCbCr->RGBA
- * resolve runs inside Unity's frame, no separate submit/fence) and ensure we're
- * outside Unity's render pass. Writes Unity's current and "safe" (GPU-completed)
- * frame numbers for resource lifetime tracking. Returns VkCommandBuffer as
- * uintptr_t, or 0 if no buffer is available this call. Render thread only. */
-uint64_t basis_gfx_vk_begin_record(uint64_t* out_current_frame, uint64_t* out_safe_frame);
-
-/* Vulkan: ask Unity for the VkImage backing a C#-side Texture/RenderTexture
- * (its GetNativeTexturePtr()). Unity inserts pipeline barriers to transition
- * the resource to the requested layout/stage/access for the calling command
- * buffer. Returns 1 on success (out_image/out_layout/out_format/out_w/out_h
- * filled), 0 if unavailable. requested_layout uses raw VkImageLayout values
- * (e.g. VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL = 2). */
+/* Vulkan: query the VkImage backing a C#-side Texture/RenderTexture (its
+ * GetNativeTexturePtr()). Observe-only — nothing is recorded into Unity's
+ * command buffer and no layout transition is requested; the caller owns all
+ * synchronisation against the image. Returns 1 on success
+ * (out_image/out_format/out_w/out_h filled), 0 if unavailable. Render thread
+ * only. */
 int basis_gfx_vk_access_texture(void* native_texture,
-                                int requested_layout,
                                 uint64_t* out_image,
-                                int* out_layout,
                                 int* out_format,
                                 int* out_w,
                                 int* out_h);

@@ -27,7 +27,6 @@ namespace Basis.Scripts.BasisCharacterController
         [SerializeField] public float gravityValue = -9.81f;
         [SerializeField] public float RaycastDistance = 0.2f;
         [SerializeField] public float MinimumColliderSize = 0.01f;
-        private Quaternion currentRotation;
         public SimulationHandler JustJumped;
         public SimulationHandler JustLanded;
         public bool LastWasGrounded = true;
@@ -323,7 +322,11 @@ namespace Basis.Scripts.BasisCharacterController
                 {
                     float fallSpeed = Mathf.Abs(currentVerticalSpeed);
                     // Suppress hip dip in FBT to avoid fighting real hip tracker data on landing.
-                    if (!(BasisAvatarIKStageCalibration.HasFBIKTrackers && Basis.BasisUI.BasisSettingsDefaults.DisableAnimationsInFBT.RawValue))
+                    // The comment already named the right question -- the code was asking a different one. The dip is
+                    // applied to the HIPS (BasisLocalRigDriver subtracts landingCrouchEffect from hipsPos), so only a
+                    // HIPS tracker has anything to be fought. HasFBIKTrackers is true for a chest/shoulder/elbow
+                    // tracker too, and those leave the pelvis fully IK-derived -- there the dip is correct and wanted.
+                    if (!(BasisAvatarIKStageCalibration.HasHipsFBIKTracker && Basis.BasisUI.BasisSettingsDefaults.DisableAnimationsInFBT.RawValue))
                     {
                         landingCrouchTarget = Mathf.Clamp(fallSpeed * landingImpactScale, 0f, maxLandingCrouchEffect);
                     }
@@ -396,15 +399,29 @@ namespace Basis.Scripts.BasisCharacterController
         {
             MovementVector = movement;
         }
+        /// <summary>
+        /// Horizontal facing that movement input is expressed in: the viewpoint (CenterEye) — the HMD in VR,
+        /// the mouse-look camera on desktop. Deliberately NOT the head bone. The head bone is an avatar-side
+        /// output that normally just copies the eye rotation, so the two agree until something overrides it —
+        /// camera tracking writing a Head-role tracker, or a real head tracker — and then the player walks off
+        /// at the angle their physical head is turned instead of where the camera points.
+        /// </summary>
+        public static Quaternion GetMovementFacing()
+        {
+            // Project view forward onto horizontal plane (avoids gimbal lock near ±90° pitch)
+            Quaternion viewRotation = BasisLocalBoneDriver.EyeControl.OutgoingWorldData.rotation;
+            Vector3 flatForward = viewRotation * Vector3.forward;
+            flatForward.y = 0f;
+            if (flatForward.sqrMagnitude < 0.0001f)
+            {
+                flatForward = -(viewRotation * Vector3.up);
+                flatForward.y = 0f;
+            }
+            return Quaternion.LookRotation(flatForward.normalized, Vector3.up);
+        }
         public void HandleMovement(float DeltaTime)
         {
-            // Cache current rotation and zero out x and z components
-            currentRotation = BasisLocalBoneDriver.HeadControl.OutgoingWorldData.rotation;
-            Vector3 rotationEulerAngles = currentRotation.eulerAngles;
-            rotationEulerAngles.x = 0;
-            rotationEulerAngles.z = 0;
-
-            Quaternion flattenedRotation = Quaternion.Euler(rotationEulerAngles);
+            Quaternion flattenedRotation = GetMovementFacing();
 
             if (CrouchBlendDelta != 0) UpdateCrouchBlend(CrouchBlendDelta);
             // Calculate horizontal movement direction

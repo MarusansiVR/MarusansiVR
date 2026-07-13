@@ -1,4 +1,4 @@
-using System.Runtime.CompilerServices;
+﻿using System.Runtime.CompilerServices;
 using Unity.Collections;
 
 namespace UnityEngine.Animations.Rigging
@@ -77,23 +77,48 @@ namespace UnityEngine.Animations.Rigging
         /// <summary>
         /// Trilinear interpolation lookup. Position should be in normalized space [-1, 1].
         /// </summary>
+        /// <remarks>
+        /// This is inside a Burst job, so an out-of-range index is not an exception you catch — it aborts the
+        /// process. It therefore must not trust its caller. <see cref="Mathf.Clamp"/> did: it reads
+        /// <c>if (v &lt; min) v = min; else if (v &gt; max) v = max;</c>, and a NaN fails BOTH comparisons, so it
+        /// passed straight through to <c>(int)NaN</c> == int.MinValue and indexed the table at -2147483648.
+        /// Anything non-finite now lands on the grid origin instead: a slightly wrong elbow for one frame beats
+        /// killing the editor.
+        /// </remarks>
+        // Ordered so that NaN fails BOTH tests and falls out at 0. Phrased the natural way round (v < 0 ? 0 :
+        // v > hi ? hi : v) a NaN takes neither branch and escapes the clamp entirely -- which is exactly how
+        // Mathf.Clamp let one through into (int)NaN == int.MinValue.
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        static float ClampToGrid(float v) =>
+            v > 0f ? (v < GridSize - 1.001f ? v : GridSize - 1.001f) : 0f;
+
+
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         public static Vector3 SampleTrilinear(NativeArray<Vector3> table, Vector3 normalizedPos)
         {
             // Map [-1,1] to [0, GridSize-1]
-            float fx = (normalizedPos.x * 0.5f + 0.5f) * (GridSize - 1);
-            float fy = (normalizedPos.y * 0.5f + 0.5f) * (GridSize - 1);
-            float fz = (normalizedPos.z * 0.5f + 0.5f) * (GridSize - 1);
-
-            // Clamp to valid grid range
-            fx = Mathf.Clamp(fx, 0f, GridSize - 1.001f);
-            fy = Mathf.Clamp(fy, 0f, GridSize - 1.001f);
-            fz = Mathf.Clamp(fz, 0f, GridSize - 1.001f);
+            float fx = ClampToGrid((normalizedPos.x * 0.5f + 0.5f) * (GridSize - 1));
+            float fy = ClampToGrid((normalizedPos.y * 0.5f + 0.5f) * (GridSize - 1));
+            float fz = ClampToGrid((normalizedPos.z * 0.5f + 0.5f) * (GridSize - 1));
 
             int x0 = (int)fx; int x1 = Mathf.Min(x0 + 1, GridSize - 1);
             int y0 = (int)fy; int y1 = Mathf.Min(y0 + 1, GridSize - 1);
             int z0 = (int)fz; int z1 = Mathf.Min(z0 + 1, GridSize - 1);
 
+            // ⚠ MEASURED, NOT A GUESS: fading these weights does NOT fix the elbow buzz.
+            //
+            // Raw-fraction trilinear is C0 but not C1 -- the gradient jumps at every cell boundary -- so the
+            // obvious theory was that a hand sweeping across cells steps the bend direction's derivative, and
+            // a step in the elbow's velocity is exactly what buzz is. Perlin's quintic fade
+            // (t*t*t*(t*(t*6-15)+10), C2, node values preserved exactly) was tried here and measured against
+            // the 20-clip CMU corpus: worst-case elbow jitter moved 1.360% -> 1.359% of arm length. Nothing.
+            // Jerk ratio and pop count did not move at all.
+            //
+            // The C1 discontinuity is real but it is NOT the dominant term: the grid is 11^3 over the whole
+            // workspace, so a reach crosses only a handful of cells, and the resulting step is small next to
+            // whatever is actually generating the noise. Left as raw fractions rather than shipping a change
+            // that cannot be justified with data. If the real source is fixed and this then becomes the
+            // largest remaining term, re-test it and the fade is three multiply-adds away.
             float tx = fx - x0;
             float ty = fy - y0;
             float tz = fz - z0;

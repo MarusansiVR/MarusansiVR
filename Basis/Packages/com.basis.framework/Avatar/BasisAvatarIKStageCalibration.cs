@@ -115,6 +115,44 @@ namespace Basis.Scripts.Avatar
         /// If Any trackers are actively connected to the IK system
         /// </summary>
         public static bool HasFBIKTrackers = false;
+
+        /// <summary>
+        /// Do trackers actually pose the LEGS?
+        ///
+        /// HasFBIKTrackers is a WHOLE-BODY flag -- it is true for a chest, shoulder, elbow or hips tracker just as
+        /// readily as for a foot. Asking it a LEG question gives the wrong answer, and the failure is silent and
+        /// severe: the animator suppresses the walk cycle "because we're in FBT", while leg IK simultaneously
+        /// disables itself during locomotion (so the animation can take over) -- and the legs end up with NO driver
+        /// at all. They freeze mid-stride.
+        ///
+        /// That went unnoticed for as long as the only things producing chest/shoulder/elbow trackers were real FBT
+        /// rigs, which carry leg trackers too -- so the suppression happened to be right, for the wrong reason.
+        /// MediaPipe spawns chest/shoulder/elbow trackers with no leg trackers anywhere, which is what exposed it.
+        ///
+        /// A leg question gets a leg answer. Read live so it self-heals on tracker dropout/reconnect.
+        /// </summary>
+        public static bool HasLegFBIKTrackers =>
+               IsRoleTracked(BasisLocalBoneDriver.LeftFootControl)
+            || IsRoleTracked(BasisLocalBoneDriver.RightFootControl)
+            || IsRoleTracked(BasisLocalBoneDriver.LeftLowerLegControl)
+            || IsRoleTracked(BasisLocalBoneDriver.RightLowerLegControl)
+            || IsRoleTracked(BasisLocalBoneDriver.LeftUpperLegControl)
+            || IsRoleTracked(BasisLocalBoneDriver.RightUpperLegControl);
+
+        /// <summary>
+        /// Is the PELVIS specifically tracker-driven?
+        ///
+        /// Distinct from HasLegFBIKTrackers on purpose: a hip tracker moves the leg ROOT but does not pose the legs,
+        /// so it should not silence the walk cycle. It DOES make the pelvis authoritative, so anything that
+        /// synthesises pelvis motion (the landing hip-dip, gait bob/sway/pelvis-rotation) must stand down or it
+        /// fights the user's real body.
+        /// </summary>
+        public static bool HasHipsFBIKTracker => IsRoleTracked(BasisLocalBoneDriver.HipsControl);
+
+        private static bool IsRoleTracked(BasisLocalBoneControl control)
+        {
+            return control != null && control.HasTracked == BasisHasTracked.HasTracker;
+        }
         /// <summary>
         /// Builds a tracker→role assignment from the player's T-pose constellation alone.
         /// The avatar is no longer the source of truth for "where should this tracker be";
@@ -140,16 +178,53 @@ namespace Basis.Scripts.Avatar
                 BasisDeviceManagement.UnassignFBTrackers();
                 BasisLocalPlayer.Instance.LocalBoneDriver.SimulateAndApplyWithoutLerp(BasisLocalPlayer.Instance);
 
-                // Avatar still goes into T-pose because ComputeHints reads chest/hips reference
-                // rotations from it. The classifier itself doesn't touch the avatar.
-                BasisLocalPlayer.Instance.LocalAvatarDriver.PutAvatarIntoTPose();
-                BasisLocalPlayer.Instance.DriveTpose();
+                // T-pose-free by default: every reference below derives from the load-time raw-joint
+                // T-pose snapshot anchored at the head (ComputeTposeAnchor — the same frame DriveTpose
+                // used to apply physically), so the avatar no longer snaps into T-pose on recalibrate.
+                // Legacy fallback keeps the physical T-pose when the snapshot is missing (abnormal),
+                // because the live-bone fallback reads inside CalculateOffset / the rotation recompute /
+                // ComputeHints are only valid on a physically T-posed, head-aligned avatar.
+                bool hasTposeSnapshot = BasisLocalAvatarDriver.HasTposeBoneSnapshot;
+                if (hasTposeSnapshot)
+                {
+                    // Re-capture avatar height without the T-pose: eye height is the authored marker and
+                    // arm span comes from the snapshot — both pose-independent.
+                    BasisHeightDriver.CaptureAvatarHeightDuringTpose();
+                }
+                else
+                {
+                    BasisLocalPlayer.Instance.LocalAvatarDriver.PutAvatarIntoTPose();
+                }
 
-                // PutAvatarIntoTPose just re-captured the avatar eye height; recompute height/scale now so
-                // DeviceScale uses it on THIS pass and classification below runs at the final scale. The
-                // OnAvatarFBCalibration() at the top ran against the pre-calibration (often previous-avatar)
-                // height, which left the nudge wrong after one calibration and only settled on a second pass.
+                // The height capture above just refreshed the avatar metrics; recompute height/scale now
+                // so DeviceScale uses them on THIS pass and classification below runs at the final scale.
+                // The OnAvatarFBCalibration() at the top ran against the pre-calibration (often previous-
+                // avatar) height, which left the nudge wrong after one calibration and only settled on a
+                // second pass.
                 BasisHeightDriver.ApplyScaleAndHeight();
+
+                // DeviceScale just changed, but every input's ScaledDeviceCoord (and the bone-control
+                // incoming fed from it) was produced by the poll above at the PRE-recompute scale.
+                // CalculateOffset (inside ClassifyAndAssignTrackersFromTPose's role application) reads
+                // ScaledDeviceCoord against avatar-bone references at the NEW scale, so any scale delta
+                // this pass baked a proportional position error (|Δscale| × unscaled pose) into every
+                // tracker offset — the "calibrate two or three times until the avatar fits" convergence.
+                // SimulateAndApplyWithoutLerp re-polls every device (OnLatePollData), which rescales
+                // ScaledDeviceCoord at the final DeviceScale, so the classifier, the anchor derivation
+                // and the offset capture all see ONE scale frame.
+                BasisLocalPlayer.Instance.LocalBoneDriver.SimulateAndApplyWithoutLerp(BasisLocalPlayer.Instance);
+                if (hasTposeSnapshot == false)
+                {
+                    BasisLocalPlayer.Instance.DriveTpose();
+                }
+
+                // Scale-free snapshot of the head anchor the offsets below are captured against, so the
+                // position offsets can later be re-derived for a different avatar/DeviceScale
+                // (ReprojectTrackerOffsetsForCurrentAvatar) exactly like the rotation references are.
+                var headOut = BasisLocalBoneDriver.HeadControl.OutGoingData;
+                BasisCalibrationMath.UnscaleDeviceCoord(headOut.position, headOut.rotation, BasisHeightDriver.DeviceScale,
+                    BasisInput.OffsetCoords.position, BasisInput.OffsetCoords.rotation, out s_calibHeadUnscaledPos, out s_calibHeadUnscaledRot);
+                HasCalibrationHeadSnapshot = true;
 
                 Dictionary<BasisBoneTrackedRole, Transform> storedRoleTransforms = BasisLocalPlayer.Instance.LocalAvatarDriver.StoredRolesTransforms;
 
@@ -168,8 +243,13 @@ namespace Basis.Scripts.Avatar
                 }
                 finally
                 {
-                    BasisLocalPlayer.Instance.LocalAvatarDriver.ResetAvatarAnimator();
-                    BasisLocalPlayer.Instance.LocalRigDriver.RigLayer.active = true;
+                    // Only restore if something actually entered T-pose: the legacy fallback above, or
+                    // an outer flow (the calibration UI's get-ready pose) that T-posed before calling us.
+                    if (BasisLocalAvatarDriver.CurrentlyTposing)
+                    {
+                        BasisLocalPlayer.Instance.LocalAvatarDriver.ResetAvatarAnimator();
+                        BasisLocalPlayer.Instance.LocalRigDriver.RigLayer.active = true;
+                    }
                 }
 
                 BasisLocalPlayer.Instance.LocalAnimatorDriver.AssignHipsFBTracker();
@@ -178,6 +258,8 @@ namespace Basis.Scripts.Avatar
                 // newly stored avatar bone transforms. No-op when the ShowGizmos
                 // master toggle is off; the toggle path rebuilds when it flips on.
                 BasisLocalPlayer.Instance.LocalBoneDriver.RebuildCalibrationSpheres();
+
+                BasisContinuousCalibration.CaptureBaseline();
 
                 OnFullBodyCalibrated?.Invoke();
             }
@@ -235,14 +317,122 @@ namespace Basis.Scripts.Avatar
         private static Quaternion s_refHead, s_refHips, s_refChest, s_refLeftFoot, s_refRightFoot,
             s_refLeftToe, s_refRightToe, s_refLeftShoulder, s_refRightShoulder;
 
+        // Scale-free head anchor captured at calibration (unscaled device space). Together with each
+        // input's CalibratedUnscaled* snapshot this lets ReprojectTrackerOffsetsForCurrentAvatar rebuild
+        // the POSITION inverse offsets for any avatar/DeviceScale — the position analog of s_ref* above.
+        public static bool HasCalibrationHeadSnapshot;
+        private static Vector3 s_calibHeadUnscaledPos;
+        private static Quaternion s_calibHeadUnscaledRot = Quaternion.identity;
+
+        /// <summary>
+        /// The scale-free head anchor the tracker snapshots were captured against. Consumers
+        /// (BasisContinuousCalibration) must express any snapshot edit in this frame so
+        /// <see cref="ReprojectTrackerOffsetsForCurrentAvatar"/> keeps rebuilding a consistent geometry.
+        /// </summary>
+        public static bool TryGetCalibrationHeadSnapshot(out Vector3 unscaledPosition, out Quaternion unscaledRotation)
+        {
+            unscaledPosition = s_calibHeadUnscaledPos;
+            unscaledRotation = s_calibHeadUnscaledRot;
+            return HasCalibrationHeadSnapshot;
+        }
+
+        /// <summary>
+        /// Re-derives every calibrated FBT tracker's POSITION inverse offset for the CURRENT avatar and
+        /// DeviceScale from the scale-free calibration snapshots — the position analog of
+        /// <see cref="ApplyCalibrationToCurrentAvatar"/> (which re-derives the per-effector ROTATION
+        /// offsets). BasisHeightDriver calls this whenever the height/scale pipeline re-resolves
+        /// (avatar swap, scale slider, OSC override), so FBT keeps fitting without redoing the T-pose.
+        /// The player's live pose is irrelevant: only the stored calibration geometry and the current
+        /// avatar's T-pose bind (TposeLocalScaled) are used. The offset ROTATION is untouched — it maps
+        /// tracker rotation to the bone-sim body frame, which is avatar- and scale-independent. No-op
+        /// until a calibration has captured a head snapshot.
+        /// </summary>
+        public static void ReprojectTrackerOffsetsForCurrentAvatar()
+        {
+            if (!HasCalibrationHeadSnapshot)
+            {
+                return;
+            }
+            BasisLocalPlayer player = BasisLocalPlayer.Instance;
+            if (player == null || player.LocalBoneDriver == null || BasisLocalBoneDriver.HeadControl == null)
+            {
+                return;
+            }
+            // Head anchor uses the head CONTROL's T-pose (what DriveTpose itself anchors the root with);
+            // each bone reference uses the RAW-joint load-time snapshot (what CalculateOffset captures
+            // against), scaled by the current avatar scale — the same two sources the live capture uses.
+            Vector3 headTpose = BasisLocalBoneDriver.HeadControl.TposeLocalScaled.position;
+            float avatarScale = player.LocalAvatarDriver != null && player.LocalAvatarDriver.ScaleAvatarModification != null
+                ? player.LocalAvatarDriver.ScaleAvatarModification.ApplyScale : 1f;
+            if (float.IsNaN(avatarScale) || float.IsInfinity(avatarScale) || avatarScale <= 1e-6f)
+            {
+                avatarScale = 1f;
+            }
+
+            BasisObservableList<BasisInput> devices = BasisDeviceManagement.Instance != null ? BasisDeviceManagement.Instance.AllInputDevices : null;
+            if (devices == null)
+            {
+                return;
+            }
+            int count = devices.Count;
+            for (int Index = 0; Index < count; Index++)
+            {
+                BasisInput input = devices[Index];
+                if (input == null || input.HasCalibratedOffsetSnapshot == false || input.HasControl == false || input.Control == null)
+                {
+                    continue;
+                }
+                if (input.TryGetRole(out BasisBoneTrackedRole role) == false
+                    || BasisBoneTrackedRoleCommonCheck.CheckItsFBTracker(role) == false
+                    || input.Control.UseInverseOffset == false)
+                {
+                    continue;
+                }
+
+                Vector3 boneTpose = BasisLocalAvatarDriver.HasTposeBoneSnapshot
+                    && BasisLocalAvatarDriver.TposeBoneSnapshot.TryGetValue(role, out var bind)
+                    ? bind.position * avatarScale
+                    : input.Control.TposeLocalScaled.position;
+
+                BasisCalibrationMath.ReprojectInverseOffsetPosition(
+                    input.CalibratedUnscaledPosition, input.CalibratedUnscaledRotation,
+                    s_calibHeadUnscaledPos, s_calibHeadUnscaledRot,
+                    BasisHeightDriver.DeviceScale, BasisInput.OffsetCoords.position, BasisInput.OffsetCoords.rotation,
+                    headTpose, boneTpose,
+                    out Vector3 inverseOffsetPosition);
+                input.Control.SetInverseOffset(inverseOffsetPosition, input.Control.InverseOffsetFromBone.rotation);
+            }
+        }
+
         private static void RecomputeFbikRotationCalibration()
         {
             var rig = BasisLocalPlayer.Instance.LocalRigDriver;
             if (rig == null || rig.BasisFullIKConstraint == null) return;
             Common.BasisTransformMapping Mapping = BasisLocalAvatarDriver.Mapping;
-            Quaternion rootRot = Mapping.HasAnimatorRoot ? Mapping.AnimatorRoot.rotation : Quaternion.identity;
+            // Calibration body frame: derived from the head (the frame DriveTpose would drive the root
+            // to) instead of reading the live avatar root — the live root only matches in the instant
+            // after a physical DriveTpose, which the T-pose-free pass no longer performs.
+            Quaternion rootRot;
+            BasisLocalBoneControl headControl = BasisLocalBoneDriver.HeadControl;
+            if (BasisLocalAvatarDriver.HasTposeBoneSnapshot && headControl != null)
+            {
+                var headWorld = headControl.OutgoingWorldData;
+                BasisCalibrationMath.ComputeTposeAnchor(headWorld.position, headWorld.rotation, headControl.TposeLocalScaled.position, out _, out rootRot);
+            }
+            else
+            {
+                rootRot = Mapping.HasAnimatorRoot ? Mapping.AnimatorRoot.rotation : Quaternion.identity;
+            }
 
-            s_refHead = CaptureCalibrationReference(BasisLocalBoneDriver.HeadControl, rootRot);
+            // The head is driven straight from the HMD with no tracker mounting offset, so its calibrated
+            // reference is pose-independent: the head effector offset is purely the avatar's head bind.
+            // Capturing it like a tracker — against the LIVE head rotation — baked the head's
+            // calibration-time pitch/roll into the offset. That's harmless for a level manual calibration
+            // (get-ready pose), but automatic calibration fires whenever the trackers announce or a
+            // SlimeVR reset lands — usually while you're looking down at the trackers — so the head sat
+            // rotated wrong afterward. An identity reference makes the head offset the bind exactly, which
+            // is what a perfectly level manual calibration already yields (so no manual regression).
+            s_refHead = Quaternion.identity;
             s_refHips = CaptureCalibrationReference(BasisLocalBoneDriver.HipsControl, rootRot);
             s_refChest = CaptureCalibrationReference(BasisLocalBoneDriver.ChestControl, rootRot);
             s_refLeftFoot = CaptureCalibrationReference(BasisLocalBoneDriver.LeftFootControl, rootRot);
@@ -270,15 +460,15 @@ namespace Basis.Scripts.Avatar
             Common.BasisTransformMapping Mapping = BasisLocalAvatarDriver.Mapping;
             Quaternion rootInv = Mapping.HasAnimatorRoot ? Quaternion.Inverse(Mapping.AnimatorRoot.rotation) : Quaternion.identity;
 
-            BasisLocalRigDriver.RecalibratedHead = OffsetFromReference(s_refHead, rootInv, Mapping.head, data.m_CalibratedRotationHead);
-            BasisLocalRigDriver.RecalibratedHips = OffsetFromReference(s_refHips, rootInv, Mapping.Hips, data.OffsetRotationHips);
-            BasisLocalRigDriver.RecalibratedChest = OffsetFromReference(s_refChest, rootInv, Mapping.chest, data.m_CalibratedRotationChest);
-            BasisLocalRigDriver.RecalibratedLeftFoot = OffsetFromReference(s_refLeftFoot, rootInv, Mapping.leftFoot, data.M_CalibrationLeftFootRotation);
-            BasisLocalRigDriver.RecalibratedRightFoot = OffsetFromReference(s_refRightFoot, rootInv, Mapping.rightFoot, data.M_CalibrationRightFootRotation);
-            BasisLocalRigDriver.RecalibratedLeftToe = OffsetFromReference(s_refLeftToe, rootInv, Mapping.leftToe, data.m_CalibratedRotationLeftToe);
-            BasisLocalRigDriver.RecalibratedRightToe = OffsetFromReference(s_refRightToe, rootInv, Mapping.rightToe, data.m_CalibratedRotationRightToe);
-            BasisLocalRigDriver.RecalibratedLeftShoulder = OffsetFromReference(s_refLeftShoulder, rootInv, Mapping.leftShoulder, data.m_CalibratedRotationLeftShoulder);
-            BasisLocalRigDriver.RecalibratedRightShoulder = OffsetFromReference(s_refRightShoulder, rootInv, Mapping.RightShoulder, data.m_CalibratedRotationRightShoulder);
+            BasisLocalRigDriver.RecalibratedHead = OffsetFromReference(s_refHead, rootInv, Mapping.head, BasisBoneTrackedRole.Head, data.m_CalibratedRotationHead);
+            BasisLocalRigDriver.RecalibratedHips = OffsetFromReference(s_refHips, rootInv, Mapping.Hips, BasisBoneTrackedRole.Hips, data.OffsetRotationHips);
+            BasisLocalRigDriver.RecalibratedChest = OffsetFromReference(s_refChest, rootInv, Mapping.chest, BasisBoneTrackedRole.Chest, data.m_CalibratedRotationChest);
+            BasisLocalRigDriver.RecalibratedLeftFoot = OffsetFromReference(s_refLeftFoot, rootInv, Mapping.leftFoot, BasisBoneTrackedRole.LeftFoot, data.M_CalibrationLeftFootRotation);
+            BasisLocalRigDriver.RecalibratedRightFoot = OffsetFromReference(s_refRightFoot, rootInv, Mapping.rightFoot, BasisBoneTrackedRole.RightFoot, data.M_CalibrationRightFootRotation);
+            BasisLocalRigDriver.RecalibratedLeftToe = OffsetFromReference(s_refLeftToe, rootInv, Mapping.leftToe, BasisBoneTrackedRole.LeftToes, data.m_CalibratedRotationLeftToe);
+            BasisLocalRigDriver.RecalibratedRightToe = OffsetFromReference(s_refRightToe, rootInv, Mapping.rightToe, BasisBoneTrackedRole.RightToes, data.m_CalibratedRotationRightToe);
+            BasisLocalRigDriver.RecalibratedLeftShoulder = OffsetFromReference(s_refLeftShoulder, rootInv, Mapping.leftShoulder, BasisBoneTrackedRole.LeftShoulder, data.m_CalibratedRotationLeftShoulder);
+            BasisLocalRigDriver.RecalibratedRightShoulder = OffsetFromReference(s_refRightShoulder, rootInv, Mapping.RightShoulder, BasisBoneTrackedRole.RightShoulder, data.m_CalibratedRotationRightShoulder);
             BasisLocalRigDriver.HasRecalibratedRotationOffsets = true;
         }
 
@@ -290,9 +480,16 @@ namespace Basis.Scripts.Avatar
 
         // offset = reference * (avatar bone relative to its own animator root). On the calibration avatar this
         // reproduces the head-driven Inverse(boneSimOutgoing) * avatarBone exactly; on a swapped-in avatar it
-        // re-targets that same calibration onto the new bind.
-        private static Quaternion OffsetFromReference(Quaternion reference, Quaternion animatorRootInv, Transform avatarBone, Quaternion current)
+        // re-targets that same calibration onto the new bind. The bind comes from the load-time raw-joint
+        // T-pose snapshot (pose-independent); the live read — Inverse(liveRoot) * liveBone — only equals the
+        // bind while the avatar is physically T-posed, so it survives solely as the no-snapshot fallback.
+        private static Quaternion OffsetFromReference(Quaternion reference, Quaternion animatorRootInv, Transform avatarBone, BasisBoneTrackedRole role, Quaternion current)
         {
+            if (BasisLocalAvatarDriver.HasTposeBoneSnapshot
+                && BasisLocalAvatarDriver.TposeBoneSnapshot.TryGetValue(role, out var bind))
+            {
+                return reference * bind.rotation;
+            }
             return avatarBone != null ? reference * (animatorRootInv * avatarBone.rotation) : current;
         }
 
@@ -377,7 +574,18 @@ namespace Basis.Scripts.Avatar
             // player should be looking straight ahead, so the projection is well defined.
             Vector3 hmdFwdHoriz = hmdUnscaledRot * Vector3.forward;
             hmdFwdHoriz.y = 0f;
-            if (hmdFwdHoriz.sqrMagnitude < 1e-4f) hmdFwdHoriz = BasisLocalPlayer.Instance.transform.forward;
+            if (hmdFwdHoriz.sqrMagnitude < 1e-4f)
+            {
+                // Near-vertical gaze (looking down at the trackers is the common calibration pose):
+                // recover the facing from the head's up axis, which tips toward the body's forward as
+                // the head pitches down (and away from it pitching up). Must stay in the unscaled
+                // playspace frame — the player transform's forward is world-space and disagrees after
+                // any snap-turn/teleport, flipping LateralRatio signs (left/right role swaps).
+                Vector3 headUpHoriz = hmdUnscaledRot * Vector3.up;
+                headUpHoriz.y = 0f;
+                hmdFwdHoriz = (hmdUnscaledRot * Vector3.forward).y < 0f ? headUpHoriz : -headUpHoriz;
+                if (hmdFwdHoriz.sqrMagnitude < 1e-4f) hmdFwdHoriz = Vector3.forward;
+            }
             hmdFwdHoriz.Normalize();
 
             Quaternion bodyRot = Quaternion.LookRotation(hmdFwdHoriz, Vector3.up);
@@ -1063,18 +1271,37 @@ namespace Basis.Scripts.Avatar
             //    We store offsets in tracker-local space so they rotate with the tracker at runtime.
             //    Then BasisLocalRigDriver applies: hintPos = rawPos + rawRot * localOffset;
 
-            // Grab reference rotations from the avatar in T-pose (stable)
+            // Reference rotations of the T-posed chest/hips: derived from the head anchor + the
+            // load-time bind snapshot (pose-independent), falling back to the live bones — which are
+            // only valid when the avatar is physically T-posed (the legacy no-snapshot path).
             Quaternion chestRefRot = Quaternion.identity;
             Quaternion hipsRefRot = Quaternion.identity;
 
-            if (storedRoleTransforms.TryGetValue(BasisBoneTrackedRole.Chest, out var chestT) && chestT != null)
+            BasisLocalBoneControl headAnchorControl = BasisLocalBoneDriver.HeadControl;
+            if (BasisLocalAvatarDriver.HasTposeBoneSnapshot && headAnchorControl != null)
             {
-                chestRefRot = chestT.rotation;
+                var headWorld = headAnchorControl.OutgoingWorldData;
+                BasisCalibrationMath.ComputeTposeAnchor(headWorld.position, headWorld.rotation, headAnchorControl.TposeLocalScaled.position, out _, out Quaternion anchorRot);
+                if (BasisLocalAvatarDriver.TposeBoneSnapshot.TryGetValue(BasisBoneTrackedRole.Chest, out var chestBind))
+                {
+                    chestRefRot = anchorRot * chestBind.rotation;
+                }
+                if (BasisLocalAvatarDriver.TposeBoneSnapshot.TryGetValue(BasisBoneTrackedRole.Hips, out var hipsBind))
+                {
+                    hipsRefRot = anchorRot * hipsBind.rotation;
+                }
             }
-
-            if (storedRoleTransforms.TryGetValue(BasisBoneTrackedRole.Hips, out var hipsT) && hipsT != null)
+            else
             {
-                hipsRefRot = hipsT.rotation;
+                if (storedRoleTransforms.TryGetValue(BasisBoneTrackedRole.Chest, out var chestT) && chestT != null)
+                {
+                    chestRefRot = chestT.rotation;
+                }
+
+                if (storedRoleTransforms.TryGetValue(BasisBoneTrackedRole.Hips, out var hipsT) && hipsT != null)
+                {
+                    hipsRefRot = hipsT.rotation;
+                }
             }
 
             // Choose push magnitudes (tweakable)

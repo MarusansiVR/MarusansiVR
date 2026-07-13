@@ -92,7 +92,7 @@ namespace Basis.IK.Debugging
                 StepHeightStrideRefFraction = 0.45f,
                 IdleSpeedThreshold = 0.05f,
                 IdleBoostFraction = 0.5f,
-                MaxPlantedYawDegrees = 35f,
+                MaxPlantedYawDegrees = 20f,
                 IdealSideEnforceFraction = 0.3f,
                 StepTargetSideFraction = 0.15f,
                 FootSideEnforceFraction = 0.2f,
@@ -140,6 +140,7 @@ namespace Basis.IK.Debugging
         public float StrideSum; public int StrideN;
         public float StepDurSum, StepDurMin, StepDurMax; public int StepDurN;
         public int AirborneTicks;
+        public int SimAirborneTicks;   // ticks the JOB declared airborne (ground out of reach)
         public int BothSteppingTicks, BothEpisodes; public float BothFirstTime;
 
         public BasisFootPeak SlideMm, ExtRatio, PenMm, HoverMm, TiltDeg, YawDeg, PlantDriftM, CrossSepM, StepLiftMm;
@@ -165,6 +166,12 @@ namespace Basis.IK.Debugging
         public float WorstExtensionRatio;
         public float WorstPenetrationMm;
         public float WorstPlantedHoverMm;
+        // Ticks the job declared AIRBORNE in a scenario whose hips never left standing height. Must be 0:
+        // an airborne avatar stops using the floor and rides a hips-relative fallback, so a false airborne
+        // silently lifts the whole player off the ground -- AND suppresses the hover metric that would have
+        // caught it. This exists because exactly that happened (legLen-based reach test; hipToFoot > legLen).
+        public int SimAirborneWhileGroundedTicks;
+        public string SimAirborneWorstScenario;
         public int Crossovers, CrossoversTolerated;
         public int BothSteppingTicks;
         public string BothSteppingWorstScenario;
@@ -265,6 +272,18 @@ namespace Basis.IK.Debugging
                     summary.WorstExtensionRatio = Mathf.Max(summary.WorstExtensionRatio, r.ExtRatio.Value);
                     summary.WorstPenetrationMm = Mathf.Max(summary.WorstPenetrationMm, r.PenMm.Value);
                     summary.WorstPlantedHoverMm = Mathf.Max(summary.WorstPlantedHoverMm, r.HoverMm.Value);
+                    // Hips never left standing height in this scenario => the sim must never call it airborne.
+                    //
+                    // Gap is excluded, and not as a convenience: the check's premise is "the hips did not rise, so
+                    // there is ground under them and the feet must be using it". Over a GAP there is no ground to
+                    // use -- the ray genuinely misses and `airborne` is the correct, intended answer. Counting it
+                    // as a false airborne would make the gate cry wolf on the one scenario built to exercise the
+                    // real airborne path, and a gate that fires when nothing is wrong gets ignored when something is.
+                    if (r.Ground != BasisFootGroundKind.Gap && r.HipUpMax - r.HipUpMin < 0.02f && r.SimAirborneTicks > 0)
+                    {
+                        summary.SimAirborneWhileGroundedTicks += r.SimAirborneTicks;
+                        if (string.IsNullOrEmpty(summary.SimAirborneWorstScenario)) summary.SimAirborneWorstScenario = r.Name;
+                    }
                     summary.Crossovers += r.CrossoverTicks;
                     summary.CrossoversTolerated += r.CrossoverTicksFastRot;
                     summary.BothSteppingTicks += r.BothSteppingTicks;
@@ -417,9 +436,26 @@ namespace Basis.IK.Debugging
                     if (lm.slideValid) res.SlideMm.Consider(lm.slideMm, t, speed);
                     if (rm.slideValid) res.SlideMm.Consider(rm.slideMm, t, speed);
                     res.ExtRatio.Consider(lm.ext, t, speed); res.ExtRatio.Consider(rm.ext, t, speed);
-                    if (lp) { res.PenMm.Consider(lm.penMm, t, speed); res.HoverMm.Consider(lm.hoverMm, t, speed); }
-                    if (rp) { res.PenMm.Consider(rm.penMm, t, speed); res.HoverMm.Consider(rm.hoverMm, t, speed); }
-                    res.TiltDeg.Consider(lm.tilt, t, speed); res.TiltDeg.Consider(rm.tilt, t, speed);
+                    // Hover means "a planted foot is floating above the floor it is supposed to be standing on".
+                    // While the sim is AIRBORNE that is not a defect, it is the point: the ground is out of leg
+                    // reach (a jump), so the feet ride the hips and hang below the body instead of staying welded
+                    // to a floor they can no longer touch. Measuring hover there just reports the jump height.
+                    // Read the flag the job itself set rather than re-deriving it here -- a mirrored copy of that
+                    // rule is exactly what let the last two foot bugs hide from this sweep.
+                    bool simAirborne = output[0].airborne;
+                    if (simAirborne) res.SimAirborneTicks++;
+                    if (lp) { res.PenMm.Consider(lm.penMm, t, speed); if (!simAirborne) res.HoverMm.Consider(lm.hoverMm, t, speed); }
+                    if (rp) { res.PenMm.Consider(rm.penMm, t, speed); if (!simAirborne) res.HoverMm.Consider(rm.hoverMm, t, speed); }
+                    // Tilt is the SLOPE clamp: "a foot standing on a surface must not tilt more than maxFootTiltDegrees
+                    // to conform to it". That is a statement about a foot ON THE GROUND, so measure it planted-only.
+                    // A SWINGING foot is deliberately pitched by the ankle (plantarflexed at toe-off, dorsiflexed for
+                    // heel-strike, up to k_ToeOffDeg); scoring that against the slope clamp would flag the heel-strike
+                    // pose as "slope clamp not holding", which it plainly is not.
+                    //
+                    // This does NOT weaken the gate: plantedRot is built with zero ankle pitch, and a planted foot's
+                    // currentRot slerps to it, so every rotation the slope clamp actually governs is still measured.
+                    if (lp) res.TiltDeg.Consider(lm.tilt, t, speed);
+                    if (rp) res.TiltDeg.Consider(rm.tilt, t, speed);
                     if (lm.yawClamp) res.YawDeg.Consider(lm.yaw, t, speed);
                     if (rm.yawClamp) res.YawDeg.Consider(rm.yaw, t, speed);
                     float lDrift = HDist(left.plantedPos, left.idealPos), rDrift = HDist(right.plantedPos, right.idealPos);
@@ -692,6 +728,8 @@ namespace Basis.IK.Debugging
             float3 planted = gpt + gn * p.footHeightOffset;
             float thigh = sideSign < 0 ? p.leftThighLen : p.rightThighLen;
             float legLen = sideSign < 0 ? p.leftLegLen : p.rightLegLen;
+            quaternion footAlign = sideSign < 0 ? p.footAlignLeft : p.footAlignRight;
+            quaternion restRot = FootRotation(fwd, gn, p, footAlign);
             return new BasisFootNativeState
             {
                 sideSign = sideSign,
@@ -700,16 +738,15 @@ namespace Basis.IK.Debugging
                 legLength = legLen,
                 phase = 0,
                 plantedPos = planted,
-                plantedRot = FootRotation(fwd, gn, p),
+                plantedRot = restRot,
                 stepStartPos = planted,
                 stepTargetPos = planted,
-                stepTargetRot = FootRotation(fwd, gn, p),
                 stepTimer = 0f,
                 stepDur = p.stepDurSlow,
                 idealPos = planted,
                 filteredNormal = gn,
                 currentPos = planted,
-                currentRot = FootRotation(fwd, gn, p),
+                currentRot = restRot,
                 kneeHint = (hips + planted) * 0.5f + fwd * (thigh * 0.4f),
             };
         }
@@ -737,7 +774,7 @@ namespace Basis.IK.Debugging
             else
             {
                 float hipsUpComp = math.dot(hips, Up);
-                float targetUpComp = hipsUpComp - p.hipToFoot;
+                float targetUpComp = hipsUpComp - p.hipToFoot - p.ankleHeight + p.footHeightOffset;
                 f.stepTargetPos = ProjectFlat(targetXZ) + Up * targetUpComp;
             }
 
@@ -750,7 +787,6 @@ namespace Basis.IK.Debugging
             float3 hGround = ProjectFlat(hips) + Up * stpUpComp;
             EnforceSide(ref stp, hGround, rawR, f.sideSign, p.stanceWidth * p.stepTargetSideFraction);
             f.stepTargetPos = stp;
-            f.stepTargetRot = FootRotation(bodyFwd, f.filteredNormal, p);
         }
 
         static void EnforceSide(ref float3 pos, float3 center, float3 bodyRight, int sideSign, float minDist)
@@ -761,7 +797,11 @@ namespace Basis.IK.Debugging
         }
 
         // Port of BasisFootSimulateJob.FootRotation (same math the driver's Quaternion version runs).
-        static quaternion FootRotation(float3 bodyFwd, float3 normal, in BasisFootSimParams p)
+        // footAlign re-seats the body-derived frame into the foot BONE's rest orientation. The sweep's avatar is
+        // synthetic and has no foot bone, so its align is identity -- frame == bone -- which keeps these numbers
+        // directly comparable to the pre-footAlign baselines. This is only used to seed InitFoot; the swing/plant
+        // rotations come from the REAL job, which the sweep runs via Execute().
+        static quaternion FootRotation(float3 bodyFwd, float3 normal, in BasisFootSimParams p, quaternion footAlign)
         {
             if (math.lengthsq(normal) < 0.001f) normal = Up;
             float3 fwd = ProjectOnPlane(bodyFwd, normal);
@@ -784,7 +824,7 @@ namespace Basis.IK.Debugging
                     result = math.mul(quaternion.AxisAngle(Up, math.radians(correction)), result);
                 }
             }
-            return result;
+            return math.mul(result, footAlign);
         }
 
         // Returns a copy of the config scaled to an avatar `s`x the nominal size: all measurements AND
@@ -811,20 +851,24 @@ namespace Basis.IK.Debugging
 
             // Mirror the driver's scale-aware clamp bounds: lengths scale linearly with the avatar,
             // gait time/speed as sqrt (pendulum/Froude). c.Scale is the scale this config represents.
-            float lengthScale = c.Scale > 1e-4f ? c.Scale : 1f;
-            float timeScale = Mathf.Sqrt(lengthScale);
+            // MUST mirror BasisLocalFootDriver.DeriveStepParameters. Bounds are fractions of the avatar's OWN
+            // leg, so they are scale-correct by construction. (The sweep used to scale them by c.Scale while the
+            // RUNTIME scaled them by avgLeg/baseAvgLeg -- which is always 1 -- so the sweep was validating a
+            // scaled system the runtime never produced. Green gate, broken small avatars. Same law now.)
+            const float k_RefLeg = 0.87f;
 
-            float raySphereRadius = Mathf.Clamp(c.FootLength * c.RaySphereRadiusMul, 0.02f * lengthScale, 0.12f * lengthScale);
+            float raySphereRadius = Mathf.Clamp(c.FootLength * c.RaySphereRadiusMul, avgLeg * (0.02f / k_RefLeg), avgLeg * (0.12f / k_RefLeg));
             float desiredOffset = c.AnkleHeight * c.FootHeightOffsetMul;
             float straightLegLimit = c.UpperLegToFootVertical + c.AnkleHeight - avgLeg;
-            float footHeightOffset = Mathf.Clamp(Mathf.Min(desiredOffset, straightLegLimit), 0.001f * lengthScale, 0.05f * lengthScale);
-            float stepTriggerDist = Mathf.Clamp(avgLeg * c.StepTriggerMul, 0.04f * lengthScale, 0.18f * lengthScale);
-            float strideScale = Mathf.Clamp(avgLeg * c.StrideScaleMul, 0.02f * lengthScale, 0.22f * lengthScale);
-            float stepHeightCalc = Mathf.Clamp(avgShin * c.StepHeightMul, 0.03f * lengthScale, 0.20f * lengthScale);
+            float footHeightOffset = Mathf.Clamp(Mathf.Min(desiredOffset, straightLegLimit), avgLeg * (0.001f / k_RefLeg), avgLeg * (0.05f / k_RefLeg));
+            float stepTriggerDist = Mathf.Clamp(avgLeg * c.StepTriggerMul, avgLeg * (0.04f / k_RefLeg), avgLeg * (0.18f / k_RefLeg));
+            float strideScale = Mathf.Clamp(avgLeg * c.StrideScaleMul, avgLeg * (0.02f / k_RefLeg), avgLeg * (0.22f / k_RefLeg));
+            float stepHeightCalc = Mathf.Clamp(avgShin * c.StepHeightMul, avgLeg * (0.03f / k_RefLeg), avgLeg * (0.20f / k_RefLeg));
             float pendulum = Mathf.PI * Mathf.Sqrt(avgLeg / 9.81f);
-            float stepDurSlow = Mathf.Clamp(pendulum * c.StepDurSlowMul, 0.10f * timeScale, 0.30f * timeScale);
-            float stepDurFast = Mathf.Clamp(pendulum * c.StepDurFastMul, 0.06f * timeScale, 0.18f * timeScale);
-            float fastSpeedRef = Mathf.Clamp(c.FastSpeedMul * Mathf.Sqrt(avgLeg * 9.81f), 1.0f * timeScale, 3.5f * timeScale);
+            float stepDurSlow = Mathf.Clamp(pendulum * c.StepDurSlowMul, pendulum * (0.10f / 0.9356f), pendulum * (0.30f / 0.9356f));
+            float stepDurFast = Mathf.Clamp(pendulum * c.StepDurFastMul, pendulum * (0.06f / 0.9356f), pendulum * (0.18f / 0.9356f));
+            float speedRef = Mathf.Sqrt(avgLeg * 9.81f);
+            float fastSpeedRef = Mathf.Clamp(c.FastSpeedMul * speedRef, speedRef * (1.0f / 2.921f), speedRef * 2.5f);
             float rayCastRange = Mathf.Max(c.HipToFoot + c.AnkleHeight, legLen) + 1.0f;
 
             return new BasisFootSimParams
@@ -870,6 +914,11 @@ namespace Basis.IK.Debugging
                 rightShinLen = c.ShinLen,
                 footLength = c.FootLength,
                 ankleHeight = c.AnkleHeight,
+                // MUST be set explicitly: default(quaternion) is all-ZEROS, not identity, and a zero quaternion
+                // would annihilate every foot rotation. The sweep's avatar is synthetic and has no foot bone, so
+                // identity is the right value -- frame == bone, exactly the pre-footAlign behaviour.
+                footAlignLeft = quaternion.identity,
+                footAlignRight = quaternion.identity,
                 stepTriggerDist = stepTriggerDist,
                 strideScale = strideScale,
                 stepHeightCalc = stepHeightCalc,
