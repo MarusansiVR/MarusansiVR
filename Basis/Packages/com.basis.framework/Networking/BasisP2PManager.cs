@@ -439,17 +439,36 @@ namespace Basis.Scripts.Networking
             if (!BasisNetworkConnection.TryGetLocalPlayerID(out ushort localId)) return;
 
             bool largeId = localId > byte.MaxValue;
-            byte channel = largeId
-                ? (byte)(BasisNetworkCommons.PlayerAvatarVeryLowLargeChannel
-                    + (smallChannel - BasisNetworkCommons.PlayerAvatarVeryLowChannel))
-                : smallChannel;
 
             var w = _p2pAvatarWriter ??= new NetDataWriter();
             w.Reset();
-            if (largeId) w.Put(localId);
-            else w.Put((byte)localId);
-            w.Put((byte)0);
-            w.Put(clientFormatWriter.Data, 0, clientFormatWriter.Length);
+
+            byte channel;
+            if (smallChannel == BasisNetworkCommons.DeltaAvatarChannel)
+            {
+                // Uplink delta [hdr][seq][baseSeq][body][additional?] → the standard delta frame
+                // the receive path already decodes: [hdr(+largeId)][playerId][interval][seq][baseSeq][body].
+                // Interval 0 decodes to the base cadence; P2P interp uses the announce cache anyway.
+                channel = BasisNetworkCommons.DeltaAvatarChannel;
+                byte hdr = clientFormatWriter.Data[0];
+                if (largeId) hdr |= 0x8;
+                w.Put(hdr);
+                if (largeId) w.Put(localId);
+                else w.Put((byte)localId);
+                w.Put((byte)0);
+                w.Put(clientFormatWriter.Data, 1, clientFormatWriter.Length - 1);
+            }
+            else
+            {
+                channel = largeId
+                    ? (byte)(BasisNetworkCommons.PlayerAvatarVeryLowLargeChannel
+                        + (smallChannel - BasisNetworkCommons.PlayerAvatarVeryLowChannel))
+                    : smallChannel;
+                if (largeId) w.Put(localId);
+                else w.Put((byte)localId);
+                w.Put((byte)0);
+                w.Put(clientFormatWriter.Data, 0, clientFormatWriter.Length);
+            }
 
             int sent = SendToAllConnected(w, channel, DeliveryMethod.Unreliable);
             if (sent > 0)
@@ -685,7 +704,7 @@ namespace Basis.Scripts.Networking
         {
             if (!_sessionsByToken.TryGetValue(token, out Session s))
             {
-                BasisDebug.LogWarning($"[P2P] NatIntroductionSuccess for unknown token {Preview(token)} from {targetEndPoint}.");
+                BasisDebug.LogWarning($"[P2P] NatIntroductionSuccess for unknown token {Preview(token)}.");
                 return;
             }
             if (s.State == P2PSessionState.Connected)
@@ -699,7 +718,7 @@ namespace Basis.Scripts.Networking
             {
                 s.ExpectedRemoteAddress = targetEndPoint.Address;
                 s.ConnectionType = type;
-                BasisDebug.Log($"[P2P] NatIntroductionSuccess: player {s.OtherPlayerId} reachable at {targetEndPoint} ({type}{(type == LiteNatAddressType.Internal ? " — same LAN" : "")}).");
+                BasisDebug.Log($"[P2P] NatIntroductionSuccess: player {s.OtherPlayerId} reachable ({type}{(type == LiteNatAddressType.Internal ? " — same LAN" : "")}).");
             }
 
             // Both sides connect to the discovered endpoint; LiteNetLib's simultaneous-open
@@ -726,7 +745,7 @@ namespace Basis.Scripts.Networking
             }
             catch (Exception ex)
             {
-                BasisDebug.LogError($"[P2P] Connect to {targetEndPoint} failed: {ex.Message}");
+                BasisDebug.LogError($"[P2P] Connect to player {s.OtherPlayerId} failed: {ex.Message}");
                 s.ConnectIssued = false;
             }
         }
@@ -750,7 +769,7 @@ namespace Basis.Scripts.Networking
                 }
                 else
                 {
-                    BasisDebug.LogWarning($"[P2P] Rejecting inbound P2P connect from {request.RemoteEndPoint} — unknown or wrong-state token {Preview(token)}.");
+                    BasisDebug.LogWarning($"[P2P] Rejecting inbound P2P connect — unknown or wrong-state token {Preview(token)}.");
                     request.Reject(new NetDataWriter());
                 }
             }
@@ -789,7 +808,7 @@ namespace Basis.Scripts.Networking
 
             if (matched == null)
             {
-                BasisDebug.LogWarning($"[P2P] PeerConnected from {peer.Address} did not match any pending session.");
+                BasisDebug.LogWarning($"[P2P] PeerConnected did not match any pending session.");
                 return;
             }
 
@@ -804,7 +823,7 @@ namespace Basis.Scripts.Networking
             ApplyState(matched, P2PSessionState.Connected);
             matched.PunchAttempts = 0;
             NotifyStateChanged(matched.OtherPlayerId, matched.State);
-            BasisDebug.Log($"[P2P] CONNECTED to player {matched.OtherPlayerId} at {peer.Address} via {(matched.ConnectionType == LiteNatAddressType.Internal ? "LAN" : "Internet")} (token {Preview(matched.Token)}); sending LinkUp to server.");
+            BasisDebug.Log($"[P2P] CONNECTED to player {matched.OtherPlayerId} via {(matched.ConnectionType == LiteNatAddressType.Internal ? "LAN" : "Internet")} (token {Preview(matched.Token)}); sending LinkUp to server.");
 
             SendSubToServer(BasisNetworkCommons.P2PSub_LinkUp, matched.OtherPlayerId, matched.Token);
             BasisAvatarRateRegistry.ForceNextAnnouncement();
@@ -852,6 +871,13 @@ namespace Basis.Scripts.Networking
                 return;
             }
 
+            if (channel == BasisNetworkCommons.DeltaAvatarChannel)
+            {
+                HandleP2PDeltaFrame(reader, expectedOtherId);
+                reader.Recycle();
+                return;
+            }
+
             bool largeId = BasisNetworkCommons.IsLargePlayerIdChannel(channel);
             int origPos = reader.Position;
             if (reader.AvailableBytes < (largeId ? 2 : 1))
@@ -885,6 +911,39 @@ namespace Basis.Scripts.Networking
             }
         }
 
+        /// <summary>
+        /// Inbound P2P DeltaAvatarChannel frame: either a control frame (a peer asking us for a
+        /// fresh uplink keyframe) or a peer's avatar delta in the standard delta layout, which the
+        /// normal delta decoder handles after the embedded-id spoof check.
+        /// </summary>
+        private static void HandleP2PDeltaFrame(NetPacketReader reader, ushort expectedOtherId)
+        {
+            if (reader.AvailableBytes < 1) return;
+            int origPos = reader.Position;
+            byte header = reader.GetByte();
+
+            if (BasisNetworkCommons.IsDeltaControlHeader(header))
+            {
+                if (header == BasisNetworkCommons.DeltaControlUplinkKeyframeRequest)
+                {
+                    Basis.Scripts.Networking.NetworkedAvatar.BasisNetworkAvatarCompressor.ForceUplinkKeyframe();
+                }
+                return;
+            }
+
+            bool largeId = BasisNetworkCommons.DeltaHeaderLargeId(header);
+            if (reader.AvailableBytes < (largeId ? 2 : 1)) return;
+            ushort embeddedId = largeId ? reader.GetUShort() : reader.GetByte();
+            if (embeddedId != expectedOtherId)
+            {
+                BasisDebug.LogWarning($"[P2P] Delta frame id {embeddedId} doesn't match session {expectedOtherId} — dropping spoofed packet.");
+                return;
+            }
+            reader.SetPosition(origPos);
+            BasisNetworkProfiler.AddToCounter(BasisNetworkProfilerCounter.InboundAvatarP2P, reader.AvailableBytes);
+            BasisNetworkHandleAvatarDelta.Handle(reader);
+        }
+
         private static void HandleDirectP2PPacket(byte channel, NetPacketReader reader, ushort senderPlayerId, DeliveryMethod deliveryMethod)
         {
             if (channel == BasisNetworkCommons.DirectSceneChannel)
@@ -911,7 +970,8 @@ namespace Basis.Scripts.Networking
             if (channel == BasisNetworkCommons.VoiceChannel ||
                 channel == BasisNetworkCommons.VoiceLargeChannel ||
                 channel == BasisNetworkCommons.DirectSceneChannel ||
-                channel == BasisNetworkCommons.DirectAvatarChannel)
+                channel == BasisNetworkCommons.DirectAvatarChannel ||
+                channel == BasisNetworkCommons.DeltaAvatarChannel)
                 return true;
             return (channel >= BasisNetworkCommons.PlayerAvatarVeryLowChannel &&
                     channel <= BasisNetworkCommons.PlayerAvatarHighAdditionalChannel) ||
@@ -1087,18 +1147,22 @@ namespace Basis.Scripts.Networking
                         case P2PSessionState.Connected:
                         {
                             long connectedAge = (long)((now - Interlocked.Read(ref s.ConnectedSinceTicks)) * StopwatchTicksToMs);
-                            if (connectedAge < ConnectedGracePeriodMs) break;
-
                             long sinceInbound = (long)((now - Interlocked.Read(ref s.LastInboundTicks)) * StopwatchTicksToMs);
-                            bool stale = sinceInbound > StaleTimeoutMs;
-                            bool neverConfirmed = !s.OffloadConfirmed && connectedAge > ConfirmTimeoutMs;
-                            if (stale || neverConfirmed)
+                            // Decision logic lives in BasisNetworkCore (BasisP2PLinkHealth) so it can be
+                            // unit-tested without a live client; this switch just carries out the verdict.
+                            switch (BasisP2PLinkHealth.EvaluateConnected(
+                                        connectedAge, sinceInbound, s.OffloadConfirmed, s.PartialRecoveryAttempts != 0,
+                                        ConnectedGracePeriodMs, StaleTimeoutMs, ConfirmTimeoutMs, HealthyDwellResetMs))
                             {
-                                EnterPartial(s, stale ? $"no inbound for {sinceInbound}ms" : "peer never confirmed");
-                            }
-                            else if (connectedAge > HealthyDwellResetMs && s.PartialRecoveryAttempts != 0)
-                            {
-                                s.PartialRecoveryAttempts = 0;
+                                case BasisP2PLinkHealth.ConnectedVerdict.DemoteStale:
+                                    EnterPartial(s, $"no inbound for {sinceInbound}ms");
+                                    break;
+                                case BasisP2PLinkHealth.ConnectedVerdict.DemoteUnconfirmed:
+                                    EnterPartial(s, "peer never confirmed");
+                                    break;
+                                case BasisP2PLinkHealth.ConnectedVerdict.ClearFlapCounter:
+                                    s.PartialRecoveryAttempts = 0;
+                                    break;
                             }
                             break;
                         }
@@ -1106,7 +1170,7 @@ namespace Basis.Scripts.Networking
                         case P2PSessionState.Reconnecting:
                         {
                             long punchAge = (long)((now - Interlocked.Read(ref s.PunchStartedTicks)) * StopwatchTicksToMs);
-                            if (punchAge > PunchTimeoutMs)
+                            if (BasisP2PLinkHealth.PunchStalled(punchAge, PunchTimeoutMs))
                             {
                                 BasisDebug.LogWarning($"[P2P] Punch to player {s.OtherPlayerId} stalled {punchAge}ms (token {Preview(s.Token)}); retrying.");
                                 ScheduleReconnect(s);
@@ -1167,6 +1231,11 @@ namespace Basis.Scripts.Networking
 
         private static void DropSession(Session s, P2PSessionState finalState)
         {
+            // A Connected session strips its peer from the server voice relay
+            // (StripP2PConnectedFromRecipients / AddP2PConnectedToExcluded). Capture that before the
+            // state changes so we can restore the server path once the session is gone.
+            bool wasConnected = s.State == P2PSessionState.Connected;
+
             ApplyState(s, finalState);
             RemoveSessionKeys(s);
             _sessionsByToken.TryRemove(s.Token, out _);
@@ -1178,6 +1247,16 @@ namespace Basis.Scripts.Networking
                 s.P2PPeer = null;
             }
             NotifyStateChanged(s.OtherPlayerId, finalState);
+
+            // Force the voice recipient list to be recomputed so the peer is put back onto the server
+            // relay immediately. Without this, a teardown that doesn't coincide with a player-list
+            // change (IndexChanged) — e.g. a Cancel or a direct-link drop while the peer stays in the
+            // instance — could leave a stale server-side exclusion, and the peer goes silent. EnterPartial/
+            // RestInPartial already do this for the degrade path; this covers the full-teardown path.
+            if (wasConnected)
+            {
+                BasisTransmissionResults.ForceVoiceRecipientResend = true;
+            }
         }
 
         private static void ApplyState(Session s, P2PSessionState newState)

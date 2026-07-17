@@ -88,21 +88,33 @@ public static class BasisLocalHeightCalculator
             genuine = false;
             BasisDebug.Log($"Seated mode; using standard eye height {BasisHeightDriver.PlayerEyeHeight}", BasisDebug.LogTag.Avatar);
         }
-        else if (BasisHeightDriver.HasPitchCalibratedHeight)
-        {
-            BasisHeightDriver.PlayerEyeHeight = BasisHeightDriver.PitchCalibratedEyeHeight;
-            BasisDebug.Log($"Using pitch-calibrated eye height: {BasisHeightDriver.PlayerEyeHeight}", BasisDebug.LogTag.Avatar);
-        }
         else
         {
             var lockToInput = BasisLocalCameraDriver.Instance?.BasisLockToInput;
             if (lockToInput != null && lockToInput.BasisInput != null)
             {
                 lockToInput.BasisInput.LatePollData();
-                // Subtract the play-space mover's vertical offset so calibrating while lifted doesn't read
-                // an inflated eye height (the offset is injected into UnscaledDeviceCoord by the device).
-                BasisHeightDriver.PlayerEyeHeight = lockToInput.BasisInput.UnscaledDeviceCoord.position.y - BasisLocalPlayspaceMover.VerticalOffset;
-                BasisDebug.Log($"Player raw eye height from device: {BasisHeightDriver.PlayerEyeHeight}", BasisDebug.LogTag.Avatar);
+                float rawEyeY = lockToInput.BasisInput.UnscaledDeviceCoord.position.y;
+
+                // Preferred: measure the eye against the player's OWN trackers' floor. The HMD and the
+                // trackers carry the same vertical shift, so this cancels ANY play-space offset — the
+                // Basis mover, the grounding lift, and offsets applied outside Basis (SteamVR/OVRAS
+                // space drags) alike. The player can calibrate wherever they happen to be.
+                if (TryGetTrackedFloor(rawEyeY, out float trackedFloorY))
+                {
+                    BasisHeightDriver.PlayerEyeHeight = rawEyeY - trackedFloorY;
+                    BasisDebug.Log($"Player eye height from tracked floor: {BasisHeightDriver.PlayerEyeHeight} (floor {trackedFloorY:F3})", BasisDebug.LogTag.Avatar);
+                }
+                else
+                {
+                    // No usable low trackers: subtract everything Basis itself injected into the device Y
+                    // (the play-space mover's vertical drag AND the height-mode grounding lift — the lift
+                    // previously leaked into the measurement and got persisted as a too-tall body).
+                    BasisHeightDriver.PlayerEyeHeight = rawEyeY
+                        - BasisLocalPlayspaceMover.VerticalOffset
+                        - BasisHeightDriver.HeightModeGroundingOffset;
+                    BasisDebug.Log($"Player raw eye height from device: {BasisHeightDriver.PlayerEyeHeight}", BasisDebug.LogTag.Avatar);
+                }
             }
             else
             {
@@ -125,65 +137,43 @@ public static class BasisLocalHeightCalculator
         BasisHeightDriver.HasGenuinePlayerEyeHeight = genuine;
     }
 
-    /// <summary>
-    /// Captures one HMD sample for pitch calibration: pitchRadians is the gaze pitch (positive =
-    /// looking up), eyeY is the HMD height with the play-space mover's vertical offset removed.
-    /// Returns false when no HMD device is available.
-    /// </summary>
-    public static bool CaptureHMDPitchSample(out float pitchRadians, out float eyeY)
-    {
-        pitchRadians = 0f;
-        eyeY = -1f;
-        var lockToInput = BasisLocalCameraDriver.Instance?.BasisLockToInput;
-        if (lockToInput != null && lockToInput.BasisInput != null)
-        {
-            lockToInput.BasisInput.LatePollData();
-            var coord = lockToInput.BasisInput.UnscaledDeviceCoord;
-            eyeY = coord.position.y - BasisLocalPlayspaceMover.VerticalOffset;
-            Vector3 forward = coord.rotation * Vector3.forward;
-            pitchRadians = Mathf.Asin(Mathf.Clamp(forward.y, -1f, 1f));
-            return true;
-        }
-        return false;
-    }
+    private static readonly System.Collections.Generic.List<float> s_trackerHeights = new(16);
 
     /// <summary>
-    /// Recovers the level-gaze eye height from three (pitch, height) HMD samples. As the head
-    /// pitches the HMD height follows Y(pitch) = P + A*sin(pitch) + B*cos(pitch) about the neck
-    /// pivot; solving that system gives the level-gaze height Y(0) = P + B, independent of whether
-    /// the "forward" pose was actually level. Falls back to the forward sample when the samples
-    /// are too close together to solve or the result lands outside the up/down range.
-    /// Each Vector2 is (x = pitch radians, y = eye height).
+    /// Gathers every free spatial tracker's unscaled height and asks
+    /// <see cref="BasisCalibrationMath.TryEstimateFloorFromTrackers"/> for the floor under the player's
+    /// feet. Pinned devices (HMD, named hand controllers) are excluded — they are head/hand evidence,
+    /// never floor evidence; linked pair-halves defer to their virtual midpoint, mirroring the
+    /// constellation classifier's own device filter.
     /// </summary>
-    public static float ComputePitchCalibratedHeight(Vector2 up, Vector2 down, Vector2 forward)
+    private static bool TryGetTrackedFloor(float hmdY, out float floorY)
     {
-        float s0 = Mathf.Sin(up.x), c0 = Mathf.Cos(up.x);
-        float s1 = Mathf.Sin(down.x), c1 = Mathf.Cos(down.x);
-        float s2 = Mathf.Sin(forward.x), c2 = Mathf.Cos(forward.x);
-        float y0 = up.y, y1 = down.y, y2 = forward.y;
-
-        float det = (s1 * c2 - c1 * s2) - s0 * (c2 - c1) + c0 * (s2 - s1);
-        if (Mathf.Abs(det) < 1e-5f)
+        floorY = 0f;
+        BasisDeviceManagement manager = BasisDeviceManagement.Instance;
+        if (manager == null)
         {
-            BasisDebug.LogWarning($"Pitch calibration: samples too close to solve (det={det:F6}); using forward height {forward.y:F4}", BasisDebug.LogTag.Avatar);
-            return forward.y;
+            return false;
         }
 
-        float detP = y0 * (s1 * c2 - c1 * s2) - s0 * (y1 * c2 - c1 * y2) + c0 * (y1 * s2 - s1 * y2);
-        float detB = (s1 * y2 - y1 * s2) - s0 * (y2 - y1) + y0 * (s2 - s1);
-        float corrected = (detP + detB) / det;
-
-        float lo = Mathf.Min(up.y, down.y);
-        float hi = Mathf.Max(up.y, down.y);
-        if (float.IsNaN(corrected) || float.IsInfinity(corrected) || corrected < lo || corrected > hi)
+        s_trackerHeights.Clear();
+        BasisObservableList<BasisInput> devices = manager.AllInputDevices;
+        int count = devices.Count;
+        for (int Index = 0; Index < count; Index++)
         {
-            BasisDebug.LogWarning($"Pitch calibration: solved height {corrected:F4} out of range [{lo:F4},{hi:F4}]; using forward height {forward.y:F4}", BasisDebug.LogTag.Avatar);
-            return forward.y;
+            BasisInput input = devices[Index];
+            if (input == null) continue;
+            if (input is BasisTouchInputDevice) continue;
+            if (input.IsLinked) continue;
+            if (input.DeviceMatchSettings != null && input.DeviceMatchSettings.HasTrackedRole) continue;
+
+            Vector3 unscaled = input.UnscaledDeviceCoord.position;
+            if (unscaled.sqrMagnitude < 1e-4f) continue;
+            s_trackerHeights.Add(unscaled.y);
         }
 
-     //   BasisDebug.Log($"Pitch calibration: up=({up.x:F3},{up.y:F4}) down=({down.x:F3},{down.y:F4}) forward=({forward.x:F3},{forward.y:F4}) corrected={corrected:F4}", BasisDebug.LogTag.Avatar);
-        return corrected;
+        return BasisCalibrationMath.TryEstimateFloorFromTrackers(s_trackerHeights, hmdY, out floorY);
     }
+
     public static void CalculateAvatarEyeHeight()
     {
         BasisLocalPlayer Local = BasisLocalPlayer.Instance;

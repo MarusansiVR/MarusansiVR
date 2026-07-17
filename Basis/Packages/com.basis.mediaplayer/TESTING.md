@@ -8,6 +8,13 @@ networks and real hardware decoders, and regressions live exactly in the parts a
 reach. Testing is therefore structured manual verification: known-good streams, a repeatable
 matrix, and evidence capture.
 
+Playback is only half of it. The native plugin parses attacker-controlled container and
+protocol bytes in-process, so a change under `Native~/` carries a security exposure that a
+playback matrix does not cover. If you are touching the C core, read
+[Native plugin changes: the security boundary](#native-plugin-changes-the-security-boundary)
+first — it sets the threat model and the malformed-input and fuzz testing that a parser change
+needs, over and above "a good file still plays."
+
 ## Rule zero: prove the feed before you blame the player
 
 Most "player bugs" found during development turn out to be feeder problems: a stalled stream,
@@ -135,9 +142,28 @@ Run the rows your change plausibly touches; run everything before a release-boun
 | Fixture | Verify |
 | --- | --- |
 | H.264 + AAC stereo | The baseline — everything else assumes this passes |
-| H.265/HEVC | Windows needs the system HEVC codec present; absence degrades cleanly |
+| H.265/HEVC | **Video actually appears** (`https://mr.town/vod/tos_hevc.mp4`, `hvc1` from stock libx265 — what most HEVC in the wild is). Check for frames, not for the absence of an error: `hvc1` keeps its parameter sets only in the `hvcC` box, so anything that loses them on the way to the decoder gives a black screen with no error raised and nothing in the Console. Absence of the codec is the other half of the row — without the HEVC Video Extension installed it must degrade cleanly, and testing only that half will pass while playback is comprehensively broken |
+| VP9 in WebM (`https://mr.town/vod/tos_vp9.webm`) | Plays on Windows (Store "VP9 Video Extensions" + a GPU with hardware VP9 — the probe gates both) and Quest (hardware everywhere). The fixture is a two-pass encode carrying superframes, so whole-superframe feeding is exercised by playing it |
+| VP9 in MP4 (`https://mr.town/vod/tos_vp9.mp4`) | The `vp09` sample-entry lane; same decode path as WebM |
+| AV1 in progressive MP4 (`https://mr.town/vod/drip.mp4`) | Plays with video on Windows (Store "AV1 Video Extension" + a GPU with hardware AV1 — RTX 30+/RX 6000+/Arc; the probe gates both) and Quest 3. This file historically misplayed as silent audio-only |
+| AV1 in fragmented MP4 (`https://mr.town/vod/tos_av1_frag.mp4`) | The `av1C`-in-`stsd` fMP4 walk with the configOBU first-AU prepend |
+| AV1 4K (`https://mr.town/vod/bbb_av1_4k.mp4`) | 2160p decode + ring memory on both platforms |
+| AV1 in WebM (`https://mr.town/vod/tos_av1.webm`) | The `V_AV1` CodecID lane (CodecPrivate = av1C record → configOBU extradata); duration + Cues seek work as for VP9 |
+| AV1 extension absent (Windows) | Uninstall/absent "AV1 Video Extension": a direct `av01` URL errors with the install hint, and the probe answers 0 so the resolver never offers AV1 |
+| AV1 on Quest 2 | No AV1 decoder on the device: a direct `av01` URL refuses cleanly, and YouTube resolution still succeeds via the VP9 lane (its probe passes there) |
+| Opus in muxed WebM (`https://mr.town/vod/tos_vp9_opus.webm`) | VP9 video + Opus audio in one file: plays whole with audio on Windows and Quest. Exercises the two-track WebM demux (blocks routed to video vs audio by TrackNumber) |
+| Opus audio-only WebM (`https://mr.town/vod/tos_opus.webm`) | An `A_OPUS`-only WebM (YouTube's audio itags 249/250/251): audio plays with no video, driven by the audio-only contract |
+| Opus decode on Windows | Native via the libopus that `com.avionblock.opussharp` ships, runtime-loaded (no Store extension, unlike VP9/AV1). Confirm audio plays in the Editor (the library resolves from the opussharp `Packages/…` path) and in a build (`opus.dll` flattened beside the plugin). If opussharp is absent the format is refused: muted audio, video unaffected, never a crash |
+| Opus on Quest | Native `audio/opus` MediaCodec with OpusHead + pre-skip/pre-roll csd; gapless start sane, audio-only path works |
+| Ogg Opus file (`.opus`) | A `.opus` URL routes as directly-playable (no resolver) and plays: the Ogg demuxer walks pages/lacing, verifies each page CRC, reads OpusHead, and feeds the same Opus decoder. A `.opus` with a damaged page resyncs on the next `OggS` rather than failing |
+| Ogg Opus seek (`.opus`) | On a range/`206` host, a `.opus` file reports its duration (a seek bar appears) and seeks — Ogg has no index, so seek is granule bisection over the byte range; it lands at page granularity near the target and resumes. A live/no-range source has no seek bar (duration 0), which is correct. Check the Editor (Windows) |
+| Unsupported video codec | `https://mr.town/vod/tos_vp8.webm` and `https://mr.town/vod/tos_mp4v.mp4` refuse with a clear "video codec 'x' is not supported" error naming the codec — never silent audio under a black screen |
+| VP9/AV1 software-fallback guard | On a GPU without hardware decode for the profile, a direct VP9/AV1 URL must produce the "video decoder produced software frames" error, not a black screen (the Store MFTs silently fall back to CPU — for AV1 that is the *majority* of pre-RTX-30 desktops; only reproducible on a no-hw box or with the extension's fallback forced) |
+| AAC decoder priming | Audio starts on the first real sample, not on the decoder's priming. AAC's encoder delay is one 1024-sample frame, which MP4 signals with an edit list (`elst media_time=1024` on anything `ffmpeg -c:a aac` produced); the samples ahead of that origin must not reach the output. **Do not try to hear this** — 21 ms of lag is below the lip-sync threshold, which is exactly why it went unnoticed for so long. Measure it: decode the file with `ffmpeg -i x.m4a -map a:0 -f f32le -acodec pcm_f32le ref.f32`, capture what the player served, and cross-correlate. Assert on the **peak's sample offset**, not a correlation value: aligned output peaks at offset 0, a stream still carrying its priming peaks at offset 1024 (the edit-list delay) — the actual defect, and reliable regardless of content, channels, or capture. (The absolute coefficient at offset 0 is content-dependent — a shifted stream reads roughly -0.07 on this fixture, but do not gate on that number.) An LPCM/WAV file is the control — no decoder, no priming, peaks at offset 0 |
 | AAC 5.1 | Windows MF decodes ≤ 5.1; correct channel mapping (use content with known channel placement, judge by ear per output speaker) |
 | AAC 5.1 in a progressive MP4 (Android) | Decodes to discrete 5.1, not silence. The esds can carry an inert SBR sync extension the Android decoder otherwise rejects (`aacDecoder 0x1001` in logcat); fixture `https://mr.town/vod/scope.mp4` |
+| MP3 bare stream (`.mp3`) | CBR and VBR play forward; a leading `ID3v2` tag is skipped and a Xing/Info/VBRI header frame is dropped (not heard as a click). Duration is reported from the header's frame count and the seek slider works. Windows uses the in-box Media Foundation MP3 decoder, Quest the `audio/mpeg` MediaCodec. Generate fixtures with `ffmpeg -i src.wav -c:a libmp3lame -b:a 192k cbr.mp3` and `-q:a 2 vbr.mp3` |
+| MP3 in MP4/M4A | An `mp4a` sample entry whose `esds` object-type-indication is `0x6B`/`0x69` plays as MP3, not misdetected as AAC (`ffmpeg -i cbr.mp3 -c copy out.m4a`) |
 | LPCM 7.1 M2TS | All 8 lanes audible and correctly placed — the only full-7.1 path on Windows |
 | PCE-signalled / >6-ch AAC | **Graceful refusal** on Windows (mute or clean error, never a crash) |
 | Trailing-moov progressive MP4 | Non-faststart file (`ffmpeg -i in.mp4 -c copy out.mp4` leaves `moov` after `mdat`): on a range/`206` server it plays with seek + duration; over a one-way stream (no ranges) it refuses cleanly with a faststart-remux hint |
@@ -165,9 +191,41 @@ runs on **Android** too (JNI `HttpsURLConnection`), not just Windows — run the
 checks on a Quest against a range/`206` VOD host (`https://`), watching `adb logcat` for a clean
 reposition (no decoder error, playback resumes at the target).
 
-> On-demand multiplayer sync is **start-together, not catch-up**: the native backend exposes
-> no absolute seek, so a client that falls behind stays behind until the next shared (re)load.
-> Late-joiner-starts-at-zero on VOD is a known limit, not a regression.
+**Seek (HLS-TS VOD)** — on the Mux master (`https://test-streams.mux.dev/x36xhzz/x36xhzz.m3u8`),
+seek both directions and confirm playback resumes **paced at 1x from the target**: a forward
+seek must not freeze for the jump distance, and a backward seek must not fast-forward through
+the intervening segments back to the pre-seek position. The segment producer repositions and
+the demux leg re-anchors delivery pacing at the flushed boundary, so a mis-anchored pace clock
+(stall forward / flood backward) is the failure to watch for. Shared clock, so check both the
+Editor (Windows) and Quest.
+
+**Seek (integrated fMP4)** — on a self-contained fragmented MP4 (moof/mdat fragments indexed by a
+`sidx`) served from a range/`206` host — e.g.
+`https://zipline.space.superneko.net/raw/bbb_sunflower_1080p_30fps_normal_idfmp4.mp4` — confirm
+`Delivery=Auto` detects OnDemand and seeks in both directions reposition cleanly and resume at the
+target with no decoder error. This is the `sidx`-driven byte-source reseek; it shares the
+byte-source seek path with progressive/trailing-moov MP4, so a regression here usually surfaces on
+those too. Distinct from fMP4 carried *in HLS*, which isn't seekable — a mid-fragment ring flush
+can't resynchronise the box parser. Check the Editor (Windows) and Quest.
+
+> On-demand multiplayer sync **drift-corrects by seeking**: the owner broadcasts its playhead
+> and a client that drifts past `DriftSeekThresholdSeconds` seeks to catch up (set 0 to
+> disable). Catch-up needs a seekable source — TS-segment HLS VOD, progressive/trailing-moov
+> MP4, and integrated fMP4 qualify; a live source can't seek, so those clients converge
+> independently to the live edge rather than using playhead-seek correction.
+
+**Seek (WebM Cues)** — on `https://mr.town/vod/tos_vp9.webm` and the trailing-Cues variant,
+seek both directions: playback lands at or just before the target (cue/cluster granularity, on
+a keyframe) and resumes paced at 1x — the same stall-forward / flood-backward failure shapes as
+the HLS row apply. Seek near the very end of the file as well (EOS race). The cueless variant
+must show no seek bar at all. `https://mr.town/vod/tos_av1.webm` rides the same cue walk with
+the AV1 branch — one both-directions pass there covers it. Check the Editor (Windows) and Quest.
+
+**Seek (MP3)** — on a `.mp3` VOD over a range/`206` server, seek both directions and near the
+end. MP3 seek is inherently approximate (no per-frame timestamps): CBR lands within a frame via
+the bitrate mapping, VBR uses the Xing TOC, so the playhead may land a fraction of a second off
+the slider — that is expected, a permanent desync or a stall is not. A `.mp3` with no Xing/Info
+header reports no duration and shows no seek bar.
 
 **Networking** — two clients minimum: owner loads URL → both play; non-owner requests control
 → ownership transfers; owner pause/stop propagates; late joiner receives current state; each
@@ -190,6 +248,13 @@ flag it as such, not as a playback bug.
 **A/V sync judgement** — use real footage with visible speech; synthetic patterns hide sync
 drift. Watch a full minute at the live edge, not five seconds. For anything subtle, capture
 diagnostics (below) rather than trusting perception.
+
+Know what this row cannot do, and do not treat audibility as the pass bar. A fixed offset
+below roughly 45 ms is still a real A/V-sync regression — it is just below the threshold where
+watching harder will find it, so this perceptual row structurally cannot see it. Audibility
+only explains why manual observation is insufficient here; it is not an acceptance tolerance.
+Anything with a constant delay in it (decoder priming, buffer alignment, resampler latency)
+must be measured against a reference decode with an explicit tolerance, not signed off by ear.
 
 **Orientation** — a horizontal mirror is invisible on symmetric content. Verify left/right
 with on-screen text or a logo, every time video-path code changes.
@@ -230,10 +295,71 @@ stream running and for letting this guide point testers at it. Be a good guest: 
 interactive test sessions, not automated soak loops, and stand up the self-hosted stack for
 anything sustained.
 
-## Native plugin changes
+## Native plugin changes: the security boundary
 
-Any change under `Native~/` needs the rebuilt binaries verified on **both** platforms it
-ships for (Windows x64 DLL, Android arm64 `.so`) — the shared C core means a protocol fix on
-one platform can regress the other. See the README's "Building the native plugin" section.
-Note the Windows DLL cannot be replaced while any Unity instance holds it loaded — close
-Unity, swap, reopen.
+`Native~/` is where the player is most exposed, and a change there is not verified the same
+way a C# change is. The C core parses container and protocol bytes **by hand** — MP4 box
+walking (`esds`/`avcc`/`hvcC`), MPEG-TS section parsing, RTSP/RTMP, WebM — and it does so
+**in-process, with no sandbox**. The bytes are attacker-controlled: a media URL is opened
+from world content and, in multiplayer, broadcast by a peer so that every other client parses
+the same hostile stream at once. A parser that reads past a buffer, trusts a length field it
+never bounds-checked, or dereferences a pointer it never validated is therefore reachable
+remotely, on every client simultaneously.
+
+Two outcomes to test against, in priority order:
+
+- **Denial of service** — the common, proven case. A malformed stream crashes or hangs the
+  decode thread and takes the process (editor or client) down with it. This has happened from
+  an ordinary `ffmpeg`-produced file: an HEVC elementary stream that reaches the decoder with
+  no frame size made the Windows Store HEVC MFT dereference a null pointer on its own worker
+  thread. The parser must refuse a sizeless or otherwise under-specified track **before** it
+  hands bytes to the decoder, not let it fail somewhere downstream.
+- **Memory corruption** — the worst case, and the reason this is a security boundary and not
+  just a stability one. Hand-rolled parsers with untrusted lengths are exactly where
+  out-of-bounds reads and writes live. Treat *any* out-of-bounds access as a security bug,
+  including a read that "only" crashes — the same missing bound is often writable with a
+  different input.
+
+So "a good file still plays" does not verify a parser change. Proving a *hostile* file cannot
+crash, hang, or corrupt does.
+
+### What to test after a parser or protocol change
+
+- **Malformed and truncated input, expecting a clean refusal.** For every parser you touch:
+  truncate the file mid-box or mid-packet; corrupt a length or size field so it points past
+  the buffer; set a dimension, channel count, or entry count to zero or to `UINT32_MAX`; nest
+  boxes to absurd depth; point an offset back at itself. The bar is **errors cleanly, never
+  crashes or hangs** — a surfaced error string is a pass, a segfault or a spin is a failure.
+  Valid-file checks miss all of this by construction; the regressions live in the inputs the
+  author didn't picture.
+- **Fuzz the demux and parse entry points under sanitizers.** The harness for this lives at
+  [`tools/media-fuzz/`](../../../tools/media-fuzz/): coverage-guided libFuzzer targets that
+  drive the real `protocol/*.c` readers under AddressSanitizer + UndefinedBehaviorSanitizer,
+  no decoder or Unity needed (`./build.sh`, then run a target against a seed corpus). ASan
+  turns a silent out-of-bounds read into a named fault with a stack — it is both how you find
+  these and how you prove one is gone. An unsanitised "it didn't crash this time" is not proof.
+  Fuzzing corrupt input is the single highest-value test this code has; a parser change that
+  ships without a fuzz pass is under-tested. When you add a parser, add a `fuzz_<name>.c` target
+  beside the others.
+- **Keep every crash's repro as a permanent fixture.** When a malformed stream is found to
+  crash, the exact file that triggered it is pinned under `tools/media-fuzz/testcases/` and
+  replayed by the `fuzz-demux` CI job (`media-native.yml`) on every native change — a fixed
+  memory-safety bug that isn't pinned by a regression repro comes back the next time the
+  surrounding code moves.
+- **Regress the good path bit-for-bit, not by eye.** A protocol fix on one transport can shift
+  the packets another transport emits, because they share the AU path. After any demux change,
+  re-run the known-good fixtures and confirm the demuxer still produces the same packets and
+  the same decoded frames. `ffprobe -show_packets` alone only compares metadata, not payload, so
+  a byte regression with unchanged sizes/timestamps would slip through — the conformance gate
+  compares per-packet payload hashes (`-show_data_hash md5`) against ffprobe, and `ffmpeg` frame
+  hashes cover pixels. Those hashes are what make "the same" objective instead of "looked fine
+  to me."
+
+### Rebuilding and platform coverage
+
+Any change under `Native~/` needs the rebuilt binaries verified on **both** platforms it ships
+for (Windows x64 DLL, Android arm64 `.so`) — the shared C core means a protocol fix on one
+platform can regress the other, and the malformed-input and fuzz checks above apply to each
+backend's decode path (Media Foundation on Windows, `AMediaCodec` on Android) as well as the
+shared parsers. See the README's "Building the native plugin" section. Note the Windows DLL
+cannot be replaced while any Unity instance holds it loaded — close Unity, swap, reopen.

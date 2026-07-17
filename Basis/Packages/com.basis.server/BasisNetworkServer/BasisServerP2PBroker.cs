@@ -106,14 +106,20 @@ namespace BasisNetworkServer
         }
 
         private static void HandleLinkUp(NetPeer sender, BasisP2PSignalMessage msg)
-        {
-            if (!_sessions.TryGetValue(msg.sessionToken, out Session s)) return;
+            => ApplyLinkUp(sender.Id, msg.sessionToken);
 
-            if (sender.Id == s.InitiatorPeerId) s.InitiatorLinkUp = true;
-            else if (sender.Id == s.TargetPeerId) s.TargetLinkUp = true;
+        // Core LinkUp handling, keyed by peer id (the NetPeer entry point only ever needs
+        // sender.Id). Exposed to tests so the offload lifecycle can be exercised without
+        // constructing LiteNetLib peers.
+        internal static void ApplyLinkUp(int senderId, string sessionToken)
+        {
+            if (!_sessions.TryGetValue(sessionToken, out Session s)) return;
+
+            if (senderId == s.InitiatorPeerId) s.InitiatorLinkUp = true;
+            else if (senderId == s.TargetPeerId) s.TargetLinkUp = true;
             else return;
 
-            BNL.Log($"[P2P] LinkUp from peer {sender.Id} (token {Preview(s.Token)}); flags InitiatorUp={s.InitiatorLinkUp} TargetUp={s.TargetLinkUp}.");
+            BNL.Log($"[P2P] LinkUp from peer {senderId} (token {Preview(s.Token)}); flags InitiatorUp={s.InitiatorLinkUp} TargetUp={s.TargetLinkUp}.");
             if (s.InitiatorLinkUp && s.TargetLinkUp)
             {
                 _offloadedPairs[PackPair(s.InitiatorPeerId, s.TargetPeerId)] = 0;
@@ -167,7 +173,7 @@ namespace BasisNetworkServer
             TrackPeerSession(sender.Id, msg.sessionToken);
             TrackPeerSession(msg.otherPlayerId, msg.sessionToken);
 
-            BNL.Log($"[P2P] Forwarding Request from peer {sender.Id} to peer {msg.otherPlayerId} (token {msg.sessionToken}).");
+            BNL.Log($"[P2P] Forwarding Request from peer {sender.Id} to peer {msg.otherPlayerId} (token {Preview(msg.sessionToken)}).");
             SendSub(target, BasisNetworkCommons.P2PSub_Request, msg.sessionToken, (ushort)sender.Id, msg.ephemeralPublicKey);
 
             // ServerArmed confirms registration before either side starts punching, avoiding a race.
@@ -202,9 +208,15 @@ namespace BasisNetworkServer
         }
 
         private static void HandleLinkLost(NetPeer sender, BasisP2PSignalMessage msg)
+            => ApplyLinkLost(sender.Id, msg.sessionToken, msg.otherPlayerId);
+
+        // Core LinkLost handling, keyed by peer id. Re-arms the session + clears offload so the
+        // relay resumes during the re-punch window, then forwards LinkLost to the other peer.
+        // Exposed to tests (the NetPeer entry point only needs sender.Id + msg fields).
+        internal static void ApplyLinkLost(int senderId, string sessionToken, int otherPlayerId)
         {
             // Re-arm session + clear offload so relay resumes during re-punch window.
-            if (_sessions.TryGetValue(msg.sessionToken, out Session s))
+            if (_sessions.TryGetValue(sessionToken, out Session s))
             {
                 bool wasOffloaded = _offloadedPairs.ContainsKey(PackPair(s.InitiatorPeerId, s.TargetPeerId));
                 s.HasA = false;
@@ -213,9 +225,11 @@ namespace BasisNetworkServer
                 s.TargetLinkUp = false;
                 s.State = SessionState.ReadyForPunch;
                 _offloadedPairs.TryRemove(PackPair(s.InitiatorPeerId, s.TargetPeerId), out _);
-                BNL.Log($"[P2P] LinkLost from peer {sender.Id} (token {Preview(s.Token)}); re-armed for punch, offload {(wasOffloaded ? "cleared (relay resumed)" : "already cleared")}.");
+                BNL.Log($"[P2P] LinkLost from peer {senderId} (token {Preview(s.Token)}); re-armed for punch, offload {(wasOffloaded ? "cleared (relay resumed)" : "already cleared")}.");
             }
-            ForwardAndDrop(sender, msg, BasisNetworkCommons.P2PSub_LinkLost, dropSession: false);
+            // Forward to the other peer (guarded) without dropping the session (re-armed above).
+            if (NetworkServer.AuthenticatedPeers.TryGetValue(otherPlayerId, out NetPeer other))
+                SendSub(other, BasisNetworkCommons.P2PSub_LinkLost, sessionToken, (ushort)senderId);
         }
 
         private static void ForwardAndDrop(NetPeer sender, BasisP2PSignalMessage msg, byte sub, bool dropSession = true)
@@ -235,7 +249,7 @@ namespace BasisNetworkServer
             if (string.IsNullOrEmpty(token)) return;
             if (!_sessions.TryGetValue(token, out Session s))
             {
-                BNL.LogWarning($"[P2P] NatIntroduceRequest with unknown token {Preview(token)} from {remoteEndPoint} — dropping.");
+                BNL.LogWarning($"[P2P] NatIntroduceRequest with unknown token {Preview(token)} — dropping.");
                 return;
             }
             if (s.State < SessionState.ReadyForPunch)
@@ -243,7 +257,7 @@ namespace BasisNetworkServer
                 BNL.LogWarning($"[P2P] NatIntroduceRequest for token {Preview(token)} in state {s.State} — not ready, dropping.");
                 return;
             }
-            BNL.Log($"[P2P] NatIntroduceRequest token={Preview(token)} from internal={localEndPoint} external={remoteEndPoint}; HasA={s.HasA} HasB={s.HasB}.");
+            BNL.Log($"[P2P] NatIntroduceRequest token={Preview(token)}; HasA={s.HasA} HasB={s.HasB}.");
 
             // Arrival order labels the slots; NatIntroduce is symmetric so it doesn't matter which is which.
             lock (s)
@@ -290,10 +304,10 @@ namespace BasisNetworkServer
                     {
                         aInternal = new IPEndPoint(IPAddress.Loopback, aInternal.Port);
                         bInternal = new IPEndPoint(IPAddress.Loopback, bInternal.Port);
-                        BNL.Log($"[P2P] SAME-HOST pair for token {Preview(token)} — rewriting internal endpoints to loopback ({aInternal}, {bInternal}) so the local punch lands.");
+                        BNL.Log($"[P2P] SAME-HOST pair for token {Preview(token)} — rewriting internal endpoints to loopback so the local punch lands.");
                     }
 
-                    BNL.Log($"[P2P] Both NAT endpoints collected for token {Preview(token)}: A={s.EndpointA_External} (int {aInternal}), B={s.EndpointB_External} (int {bInternal}). Firing NatIntroduce (spray={spray}).{lanTag}");
+                    BNL.Log($"[P2P] Both NAT endpoints collected for token {Preview(token)}. Firing NatIntroduce (spray={spray}).{lanTag}");
                     LiteNetLib.NetManager lnlManager = (NetworkServer.Server as LNLNetManager)?.manager;
                     if (lnlManager == null) return;
                     lnlManager.NatPunchModule.NatIntroduce(
@@ -382,5 +396,40 @@ namespace BasisNetworkServer
             NetworkServer.TrySend(to, writer, BasisNetworkCommons.P2PChannel, DeliveryMethod.ReliableOrdered);
             NetworkServer.ReturnWriter(writer);
         }
+
+        // --- Test seams (InternalsVisibleTo BasisServerTests) -------------------------------
+        // The NetPeer-based entry points (HandleRequest/HandleAccept) can't be driven from a
+        // unit test because NetPeer has only internal constructors that need a live NetManager.
+        // These let a test set up a session and clear state directly, keyed by peer id, so the
+        // offload lifecycle (establish -> disconnect -> rejoin with a reused id) is testable.
+
+        // Clears all broker state so each test starts from a clean slate (the dictionaries are
+        // static and otherwise persist across tests in the same run).
+        internal static void ResetForTests()
+        {
+            _sessions.Clear();
+            _peerSessions.Clear();
+            _offloadedPairs.Clear();
+        }
+
+        // Registers a session the way HandleRequest would (session record + per-peer tracking),
+        // without needing NetPeers. State starts past Awaiting (as it would be after Accept).
+        internal static void RegisterSessionForTests(string token, int initiatorId, int targetId)
+        {
+            var session = new Session
+            {
+                Token = token,
+                InitiatorPeerId = initiatorId,
+                TargetPeerId = targetId,
+                State = SessionState.ReadyForPunch,
+            };
+            _sessions[token] = session;
+            TrackPeerSession(initiatorId, token);
+            TrackPeerSession(targetId, token);
+        }
+
+        // True if the broker currently holds a session under this token (used by tests to assert
+        // that disconnect/cancel fully tore the session down, not just the offload flag).
+        internal static bool HasSessionForTests(string token) => _sessions.ContainsKey(token);
     }
 }

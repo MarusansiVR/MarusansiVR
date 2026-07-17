@@ -201,7 +201,11 @@ namespace Basis.Scripts.Networking.Receivers
 
         public bool HasCurrentBuffer = false;
         public bool HasNextBuffer = false;
+        public bool HasPreviousBuffer = false;
         public bool SentLatest = false;
+        // Catmull-Rom control points: Previous(p0) -> Current(p1) -> Next(p2) -> peek staged(p3).
+        // Previous is the retained outgoing Current; it supplies the p0 tangent for the spline.
+        public BasisAvatarBuffer Previous { get; private set; }
         public BasisAvatarBuffer Current { get; private set; }
         public BasisAvatarBuffer Next { get; private set; }
 
@@ -213,6 +217,49 @@ namespace Basis.Scripts.Networking.Receivers
         public float CachedHumanScaleDebug => CachedHumanScale;
         public float BytesPerSecond => _bytesPerSecond;
         public float PacketsPerSecond => _packetsPerSecond;
+
+        /// <summary>When true, effectors the sender marked anchored (mask on the wire) are two-bone-IK'd
+        /// to their sent world targets after skeleton FK. On by default; a server admin can disable it
+        /// server-wide (BasisNetworkModeration.GlobalEndEffectorIKDisabled → BroadcastLockState). Only
+        /// world-stable effectors (tracked hands/feet) are ever anchored, so emotes and posed limbs are
+        /// untouched.</summary>
+        public static bool EndEffectorIKEnabled = true;
+
+        /// <summary>
+        /// Interpolates this player's anchored end-effector targets (hips-local offset + tip rotation +
+        /// swivel) and writes them to the remote bone job system's playerId-keyed inputs. Runs on the
+        /// pre-schedule receiver pass — no transform access; the Burst read/compute/write jobs do the
+        /// actual anchoring. Only limbs anchored in BOTH bracketing frames stay masked; the rest FK.
+        /// </summary>
+        public unsafe void WriteEffectorJobInputs()
+        {
+            BasisAvatarBuffer cur = Current, nxt = Next;
+            int mask = (cur != null && nxt != null) ? (cur.EffectorMask & nxt.EffectorMask) : 0;
+            if (mask == 0)
+            {
+                BasisRemoteNetworkDriver.ClearEffectorMask(playerId);
+                return;
+            }
+
+            float t = math.saturate((float)interpolationTime);
+            int n = BasisAvatarEndEffectors.EffectorCount;
+            float3* offsets = stackalloc float3[n];
+            quaternion* tipRots = stackalloc quaternion[n];
+            float* swivels = stackalloc float[n];
+            for (int i = 0; i < n; i++)
+            {
+                offsets[i] = math.lerp(cur.EffectorPos[i], nxt.EffectorPos[i], t);
+                tipRots[i] = BasisRemoteInterpolationCore.NlerpShortest(cur.EffectorRot[i], nxt.EffectorRot[i], t);
+                swivels[i] = AngleLerpShortest(cur.EffectorSwivel[i], nxt.EffectorSwivel[i], t);
+            }
+            BasisRemoteNetworkDriver.WriteEffectorInputs(playerId, (byte)mask, offsets, tipRots, swivels);
+        }
+
+        static float AngleLerpShortest(float a, float b, float t)
+        {
+            float d = math.atan2(math.sin(b - a), math.cos(b - a));   // wrapped shortest delta, safe across ±π
+            return a + d * t;
+        }
 
         /// <summary>Records received bytes-on-wire for this player (call from the packet handler; thread-safe).</summary>
         public void AccountReceivedBytes(int bytes)
@@ -477,10 +524,14 @@ namespace Basis.Scripts.Networking.Receivers
 
                 while (interpolationTime >= 1.0 && _stagedRing.Count != 0)
                 {
-                    if (HasCurrentBuffer)
+                    // Retain the outgoing Current as Previous (p0 tangent) rather than releasing
+                    // it; release the stale Previous first so the buffer pool doesn't leak.
+                    if (HasPreviousBuffer)
                     {
-                        ReleaseCurrent();
+                        BasisAvatarBufferPool.Release(Previous);
                     }
+                    Previous = Current;
+                    HasPreviousBuffer = HasCurrentBuffer;
 
                     Current = Next;
                     HasCurrentBuffer = true;
@@ -522,17 +573,22 @@ namespace Basis.Scripts.Networking.Receivers
 
                 if (SentLatest)
                 {
-                    var first = Current;
-                    var last = Next;
+                    var p1 = Current;
+                    var p2 = Next;
+                    // p0 = retained Previous (duplicate p1 at cold start); p3 = peek the next
+                    // staged frame (duplicate p2 on underrun). Duplicated endpoints make the
+                    // Catmull-Rom tangents one-sided — the spline stays bounded, no branch needed.
+                    var p0 = HasPreviousBuffer ? Previous : p1;
+                    var p3 = _stagedRing.TryPeekOldest(out var peek) ? peek : p2;
                     BasisRemoteNetworkDriver.SetFrameInputs(
                         playerId,
                         CachedHumanScale,
-                        first.Position, last.Position,
-                        first.Scale, last.Scale,
-                        first.Rotation, last.Rotation,
-                        first.HipsLocalDelta, last.HipsLocalDelta,
-                        first.HipsLocalRotation, last.HipsLocalRotation,
-                        first.BoneRotations, last.BoneRotations
+                        p0.Position, p1.Position, p2.Position, p3.Position,
+                        p1.Scale, p2.Scale,
+                        p0.Rotation, p1.Rotation, p2.Rotation, p3.Rotation,
+                        p1.HipsLocalDelta, p2.HipsLocalDelta,
+                        p1.HipsLocalRotation, p2.HipsLocalRotation,
+                        p0.BoneRotations, p1.BoneRotations, p2.BoneRotations, p3.BoneRotations
                     );
                     IsDataReady = true;
                     SentLatest = false;
@@ -774,6 +830,14 @@ namespace Basis.Scripts.Networking.Receivers
             if (HasCurrentBuffer) return;
             if (_stagedRing.TryDequeueOldest(out var first))
             {
+                // Fresh window (cold start or recovery after starvation): any retained Previous
+                // predates the gap and would poison the p0 tangent, so drop it — p0 duplicates p1.
+                if (HasPreviousBuffer)
+                {
+                    BasisAvatarBufferPool.Release(Previous);
+                    Previous = null;
+                    HasPreviousBuffer = false;
+                }
                 Current = first;
                 SentLatest = true;
                 HasCurrentBuffer = true;
@@ -802,6 +866,12 @@ namespace Basis.Scripts.Networking.Receivers
 
         public void ClearAndRelease()
         {
+            if (HasPreviousBuffer)
+            {
+                BasisAvatarBufferPool.Release(Previous);
+                Previous = null;
+                HasPreviousBuffer = false;
+            }
             ReleaseCurrent();
             if (HasNextBuffer)
             {

@@ -26,6 +26,7 @@
 #include <android/log.h>
 
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -59,6 +60,7 @@ typedef struct {
     int chead, ccount;
     long trims;          /* diagnostics: clock-gated trims fired */
     int lastTrimFloats;  /* diagnostics: floats dropped by the last trim */
+    int64_t playedUs;    /* PTS served up to = playback front (audio-only position) */
     pthread_mutex_t m;
 } pcm_ring;
 
@@ -73,7 +75,7 @@ typedef struct {
  * on the discontinuity rather than discarding real-time delivery forever. */
 #define PCM_TRIM_LATE_US     150000LL
 
-static void ring_init(pcm_ring* r, int floats) { r->buf = malloc(sizeof(float) * floats); r->cap = floats; r->head = r->tail = 0; r->frame = 2; r->sr = 48000; r->chead = r->ccount = 0; r->trims = 0; r->lastTrimFloats = 0; pthread_mutex_init(&r->m, NULL); }
+static void ring_init(pcm_ring* r, int floats) { r->buf = malloc(sizeof(float) * floats); r->cap = floats; r->head = r->tail = 0; r->frame = 2; r->sr = 48000; r->chead = r->ccount = 0; r->trims = 0; r->lastTrimFloats = 0; r->playedUs = INT64_MIN; pthread_mutex_init(&r->m, NULL); }
 static void ring_free(pcm_ring* r) { free(r->buf); r->buf = NULL; pthread_mutex_destroy(&r->m); }
 static void ring_set_frame(pcm_ring* r, int frame, int sr) {
     pthread_mutex_lock(&r->m);
@@ -143,6 +145,7 @@ static int ring_read(pcm_ring* r, float* out, int n, int64_t target_us, int64_t 
         }
     }
     int got = 0;
+    int64_t frontPts = (r->ccount > 0) ? r->chunks[r->chead].pts : INT64_MIN;
     while (got < n && r->ccount > 0) {
         pcm_chunk* c = &r->chunks[r->chead];
         if (target_us != INT64_MIN && c->pts > target_us + early_hold_us) break;
@@ -152,6 +155,11 @@ static int ring_read(pcm_ring* r, float* out, int n, int64_t target_us, int64_t 
         if (take == c->floats) { r->chead = (r->chead + 1) % PCM_CHUNKS; r->ccount--; }
         else { c->floats -= take; c->pts += (int64_t)take * 1000000LL / ((int64_t)r->frame * srr); }
     }
+    /* Publish the playback front so an audio-only stream has a position. Only
+     * when samples actually served: a gated read that breaks before copying
+     * leaves the front unserved, so its PTS isn't yet "played". */
+    if (frontPts != INT64_MIN && got > 0)
+        r->playedUs = frontPts + (int64_t)(got / (r->frame > 0 ? r->frame : 1)) * 1000000LL / srr;
     pthread_mutex_unlock(&r->m);
     return got;
 }
@@ -205,7 +213,7 @@ struct basis_decoder {
 
     basis_codec_t vc;
     int vw, vh;               /* coded frame dims (buffer size, macroblock-padded) */
-    int dispW, dispH;         /* display dims from the codec crop rect; 0 until first frame */
+    uint64_t dispWH;          /* display dims (w<<32)|h, published as one atomic; 0 until first frame */
     int fcValid, fcL, fcT, fcR, fcB; /* MediaFormat display-crop rect (authoritative when present) */
     int vconfigured, aconfigured;
 
@@ -224,7 +232,8 @@ struct basis_decoder {
     pthread_t worker;
     int worker_started;
 
-    int64_t lastPtsUs;      /* decode edge: PTS of the newest frame written to the ring */
+    int64_t lastPtsUs;      /* video decode edge: PTS of the newest decoded video frame
+                             * (set only on the video path; stays -1 for audio-only) */
     pcm_ring pcm;
 
     /* video frame ring (parallel arrays; img==NULL marks an empty slot) */
@@ -302,23 +311,32 @@ static void on_image(void* ctx, AImageReader* reader) {
             AHardwareBuffer_Desc dsc; AHardwareBuffer_describe(dahb, &dsc);
             bufW = (int)dsc.width; bufH = (int)dsc.height;
         }
-        if (bufW <= 0) bufW = d->vw > 0 ? d->vw : (aw > 0 ? aw : 1);
-        if (bufH <= 0) bufH = d->vh > 0 ? d->vh : (ah > 0 ? ah : 1);
+        /* Snapshot the coded dims and the MediaFormat crop rect as a unit under
+         * d->vm: both are written on the decode thread, and a format change must
+         * not leave us mixing old and new values here. */
+        pthread_mutex_lock(&d->vm);
+        int vw = d->vw, vh = d->vh;
+        int fcv = d->fcValid, fl = d->fcL, ft = d->fcT, fr = d->fcR, fb = d->fcB;
+        pthread_mutex_unlock(&d->vm);
+        if (bufW <= 0) bufW = vw > 0 ? vw : (aw > 0 ? aw : 1);
+        if (bufH <= 0) bufH = vh > 0 ? vh : (ah > 0 ? ah : 1);
 
         int cw = bufW, ch = bufH, cl = 0, ct = 0;
         AImageCropRect cr; int haveImgCrop = (AImage_getCropRect(img, &cr) == AMEDIA_OK);
-        if (d->fcValid) {
+        if (fcv) {
             /* MediaFormat crop right/bottom are inclusive (w = right-left+1);
              * fall back to exclusive if the inclusive read overshoots the buffer. */
-            int rw = d->fcR - d->fcL + 1, rh = d->fcB - d->fcT + 1;
-            if (rw <= 0 || rw > bufW) rw = d->fcR - d->fcL;
-            if (rh <= 0 || rh > bufH) rh = d->fcB - d->fcT;
-            if (rw > 0 && rh > 0 && d->fcL >= 0 && d->fcT >= 0 && rw <= bufW && rh <= bufH) {
-                cw = rw; ch = rh; cl = d->fcL; ct = d->fcT;
+            int rw = fr - fl + 1, rh = fb - ft + 1;
+            if (rw <= 0 || rw > bufW) rw = fr - fl;
+            if (rh <= 0 || rh > bufH) rh = fb - ft;
+            /* Require the whole rectangle inside the buffer: a non-zero offset
+             * plus the extent must not run past the edge. */
+            if (rw > 0 && rh > 0 && fl >= 0 && ft >= 0 && fl <= bufW - rw && ft <= bufH - rh) {
+                cw = rw; ch = rh; cl = fl; ct = ft;
             }
         } else if (haveImgCrop && (cr.right - cr.left) > 0 && (cr.bottom - cr.top) > 0 &&
                    cr.left >= 0 && cr.top >= 0 &&
-                   (cr.right - cr.left) <= bufW && (cr.bottom - cr.top) <= bufH) {
+                   cr.right <= bufW && cr.bottom <= bufH) {
             cw = cr.right - cr.left; ch = cr.bottom - cr.top; cl = cr.left; ct = cr.top;
         } else if (aw > 0 && ah > 0 && aw <= bufW && ah <= bufH && (aw < bufW || ah < bufH)) {
             cw = aw; ch = ah;   /* AImage reports the display size directly */
@@ -327,8 +345,9 @@ static void on_image(void* ctx, AImageReader* reader) {
         float uvox = (float)cl / bufW, uvoy = (float)ct / bufH;
         if (cw < bufW) { float tx = 1.0f / bufW; uvsx -= 2.0f * tx; uvox += tx; }
         if (ch < bufH) { float ty = 1.0f / bufH; uvsy -= 2.0f * ty; uvoy += ty; }
-        __atomic_store_n(&d->dispW, cw, __ATOMIC_RELAXED);
-        __atomic_store_n(&d->dispH, ch, __ATOMIC_RELAXED);
+        /* Publish w and h as one value so a reader can't latch a mixed pair
+         * (new width, old height) across a format change and size the RT wrong. */
+        __atomic_store_n(&d->dispWH, ((uint64_t)(uint32_t)cw << 32) | (uint32_t)ch, __ATOMIC_RELAXED);
 
         pthread_mutex_lock(&d->vm);
         int slot = -1; for (int i = 0; i < VRING; ++i) if (!d->vimg[i]) { slot = i; break; }
@@ -384,14 +403,19 @@ static void drain_video_output(basis_decoder_t* d) {
             int32_t w = 0, h = 0;
             AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_WIDTH, &w);
             AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_HEIGHT, &h);
-            if (w > 0 && h > 0) { d->vw = w; d->vh = h; }
             /* Display crop: the coded buffer pads to a macroblock multiple; this
              * rect is the visible region. Authoritative when the codec sets it
-             * (AImage_getCropRect is unreliable on some devices). */
+             * (AImage_getCropRect is unreliable on some devices). Publish the
+             * coded dims and crop rect together under d->vm (on_image reads them
+             * on the listener thread), clearing the crop on every format change
+             * so a format that drops it doesn't leave a stale one active. */
             int32_t cl = 0, ct = 0, crr = 0, cb = 0;
-            if (AMediaFormat_getRect(f, AMEDIAFORMAT_KEY_DISPLAY_CROP, &cl, &ct, &crr, &cb)) {
-                d->fcL = cl; d->fcT = ct; d->fcR = crr; d->fcB = cb; d->fcValid = 1;
-            }
+            int haveCrop = AMediaFormat_getRect(f, AMEDIAFORMAT_KEY_DISPLAY_CROP, &cl, &ct, &crr, &cb);
+            pthread_mutex_lock(&d->vm);
+            if (w > 0 && h > 0) { d->vw = w; d->vh = h; }
+            d->fcValid = haveCrop ? 1 : 0;
+            if (haveCrop) { d->fcL = cl; d->fcT = ct; d->fcR = crr; d->fcB = cb; }
+            pthread_mutex_unlock(&d->vm);
             AMediaFormat_delete(f);
         } else {
             break; /* try again later / no buffer */
@@ -412,12 +436,18 @@ static void drain_audio_output(basis_decoder_t* d) {
                 int frame = d->ach > 0 ? d->ach : (d->pcm.frame > 0 ? d->pcm.frame : 2);
                 int srr = d->asr > 0 ? d->asr : 48000;
                 if (d->apcm_float) {
-                    ring_write(&d->pcm, (const float*)(buf + info.offset), (int)(info.size / 4), pts);
+                    int n = (int)(info.size / 4);
+                    /* Priming is dropped by starting past it; the time below is
+                     * derived from the offset, so it stays right for the rest. */
+                    int skip = basis_frames_before_origin(pts, n / frame, srr) * frame;
+                    if (skip < n)
+                        ring_write(&d->pcm, (const float*)(buf + info.offset) + skip, n - skip,
+                                   pts + (int64_t)(skip / frame) * 1000000LL / srr);
                 } else {
                     int n = info.size / 2; /* 16-bit PCM */
                     float tmp[4096];
                     const int16_t* s16 = (const int16_t*)(buf + info.offset);
-                    int off = 0;
+                    int off = basis_frames_before_origin(pts, n / frame, srr) * frame;
                     while (off < n) {
                         int chunk = n - off; if (chunk > 4096) chunk = 4096;
                         for (int i = 0; i < chunk; ++i) tmp[i] = s16[off + i] / 32768.0f;
@@ -507,6 +537,30 @@ static void* url_worker(void* arg) {
 }
 
 /* ---- internal API ------------------------------------------------------- */
+
+int basis_decoder_probe_video_codec(int codec) {
+    /* Cached per process (0 unprobed / 1 no / 2 yes); atomics keep the
+     * concurrent worker-thread accesses defined, and a racing recompute
+     * stores the same verdict. createDecoderByType is the platform answer —
+     * every Quest hardware-decodes VP9, and AV1 tracks the silicon (Quest 3 /
+     * XR2 Gen 2 has hardware AV1, Quest 2 has no AV1 decoder at all), so
+     * decoder presence is the right verdict there. (On general Android this
+     * can return the software c2.android decoder and probe optimistic; the
+     * NDK exposes no MediaCodecList to tell them apart.) */
+    static _Atomic int cache[BASIS_CODEC_AV1 + 1];
+    if (codec < BASIS_CODEC_H264 || codec > BASIS_CODEC_AV1) return 0;
+    int c = atomic_load(&cache[codec]);
+    if (c) return c == 2;
+    const char* mime = codec == BASIS_CODEC_H265 ? "video/hevc"
+                     : codec == BASIS_CODEC_VP9  ? "video/x-vnd.on2.vp9"
+                     : codec == BASIS_CODEC_AV1  ? "video/av01"
+                     : "video/avc";
+    int ok = 0;
+    AMediaCodec* dec = AMediaCodec_createDecoderByType(mime);
+    if (dec) { ok = 1; AMediaCodec_delete(dec); }
+    atomic_store(&cache[codec], ok ? 2 : 1);
+    return ok;
+}
 
 basis_decoder_t* basis_decoder_create(basis_media_engine_t* engine) {
     basis_decoder_t* d = (basis_decoder_t*)calloc(1, sizeof(*d));
@@ -607,7 +661,10 @@ int basis_decoder_set_video_format(basis_decoder_t* d, basis_codec_t codec,
                                    const uint8_t* extradata, int extradata_len, int w, int h) {
     if (!d || d->vconfigured) return 0;
     d->vc = codec; if (w > 0) d->vw = w; if (h > 0) d->vh = h;
-    const char* mime = (codec == BASIS_CODEC_H265) ? "video/hevc" : "video/avc";
+    const char* mime = (codec == BASIS_CODEC_H265) ? "video/hevc"
+                     : (codec == BASIS_CODEC_VP9)  ? "video/x-vnd.on2.vp9"
+                     : (codec == BASIS_CODEC_AV1)  ? "video/av01"
+                     : "video/avc";
 
     if (ensure_reader(d, d->vw ? d->vw : 1280, d->vh ? d->vh : 720) != 0) return -1;
 
@@ -616,7 +673,7 @@ int basis_decoder_set_video_format(basis_decoder_t* d, basis_codec_t codec,
     AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_WIDTH, d->vw ? d->vw : 1280);
     AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_HEIGHT, d->vh ? d->vh : 720);
     if (extradata && extradata_len > 0)
-        AMediaFormat_setBuffer(fmt, "csd-0", (void*)extradata, extradata_len); /* Annex-B SPS/PPS(/VPS) */
+        AMediaFormat_setBuffer(fmt, "csd-0", (void*)extradata, extradata_len); /* Annex-B SPS/PPS(/VPS); AV1 configOBUs */
 
     AMediaCodec* c = AMediaCodec_createDecoderByType(mime);
     if (!c || AMediaCodec_configure(c, fmt, d->window, NULL, 0) != AMEDIA_OK ||
@@ -664,8 +721,11 @@ static int aac_core_asc_len(const uint8_t* asc, int asc_len) {
     if (asc_bits(asc, asc_len, &p, 1) == 1)                    /* dependsOnCoreCoder */
         asc_bits(asc, asc_len, &p, 14);                        /* coreCoderDelay */
     asc_bits(asc, asc_len, &p, 1);                             /* extensionFlag (0 for LC) */
-    if (p < 0 || p > asc_len * 8) return asc_len;
-    int core_len = (p + 7) / 8;
+    /* Only the byte-aligned two-byte AAC-LC core is trimmed: a set
+     * dependsOnCoreCoder pushes p to 30 bits, where (p+7)/8 would keep two bits
+     * of the sync extension and hand the decoder a malformed csd-0. */
+    if (p != 16) return asc_len;
+    int core_len = 2;
     if (asc_bits(asc, asc_len, &p, 11) == 0x2b7 &&             /* SBR sync extension */
         asc_bits(asc, asc_len, &p, 5) == 5 &&                  /* extensionAudioObjectType = SBR */
         asc_bits(asc, asc_len, &p, 1) == 0)                    /* sbrPresentFlag = 0: inert */
@@ -696,6 +756,70 @@ int basis_decoder_set_audio_format(basis_decoder_t* d, basis_codec_t codec,
         d->aLpcmBits = bits;
         d->aLpcmLE = le;
         ring_set_frame(&d->pcm, channels, sample_rate);
+        d->aconfigured = 1;
+        return 0;
+    }
+
+    if (codec == BASIS_CODEC_OPUS) {
+        /* Native MediaCodec Opus (audio/opus, a required core codec). csd-0 is
+         * the OpusHead; C2 Opus decoders also want csd-1 (codec delay / encoder
+         * pre-skip in ns) and csd-2 (seek pre-roll, 80 ms in ns) as 8-byte
+         * native-endian (LE on arm64) int64 buffers — ExoPlayer's exact shape;
+         * older decoders reject a csd-0-only config. The decoder honours the
+         * pre-skip itself, so no hand-trim here (unlike the Windows libopus lane).
+         * Channel count comes from OpusHead byte 9; Opus always decodes 48 kHz. */
+        if (!asc || asc_len < 19 || memcmp(asc, "OpusHead", 8) != 0) return 0;
+        int ch = asc[9];
+        int preskip = asc[10] | (asc[11] << 8);
+        if (ch < 1 || ch > 8) return 0;
+        d->ac = BASIS_CODEC_OPUS;
+        d->asr = 48000; d->ach = ch;
+        ring_set_frame(&d->pcm, ch, 48000);
+        AMediaFormat* fmt = AMediaFormat_new();
+        AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "audio/opus");
+        AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_SAMPLE_RATE, 48000);
+        AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_CHANNEL_COUNT, ch);
+        AMediaFormat_setBuffer(fmt, "csd-0", (void*)asc, asc_len);
+        int64_t csd1 = (int64_t)preskip * 1000000000LL / 48000; /* codec delay ns */
+        int64_t csd2 = 80000000LL;                              /* seek pre-roll 80 ms ns */
+        AMediaFormat_setBuffer(fmt, "csd-1", &csd1, sizeof(csd1));
+        AMediaFormat_setBuffer(fmt, "csd-2", &csd2, sizeof(csd2));
+        AMediaCodec* c = AMediaCodec_createDecoderByType("audio/opus");
+        if (!c || AMediaCodec_configure(c, fmt, NULL, NULL, 0) != AMEDIA_OK ||
+            AMediaCodec_start(c) != AMEDIA_OK) {
+            if (c) AMediaCodec_delete(c);
+            AMediaFormat_delete(fmt);
+            d->aconfigured = 1;
+            return -1;
+        }
+        d->acodec = c;
+        AMediaFormat_delete(fmt);
+        d->aconfigured = 1;
+        return 0;
+    }
+
+    if (codec == BASIS_CODEC_MP3) {
+        /* MediaCodec's audio/mpeg decoder parses the frame headers itself, so no
+         * csd is supplied — unlike AAC. Same MediaCodec submit/drain path. */
+        d->ac = BASIS_CODEC_MP3;
+        d->asr = sample_rate; d->ach = channels;
+        ring_set_frame(&d->pcm, channels ? channels : 2, sample_rate);
+        AMediaFormat* fmt = AMediaFormat_new();
+        AMediaFormat_setString(fmt, AMEDIAFORMAT_KEY_MIME, "audio/mpeg");
+        AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_SAMPLE_RATE, sample_rate ? sample_rate : 48000);
+        AMediaFormat_setInt32(fmt, AMEDIAFORMAT_KEY_CHANNEL_COUNT, channels ? channels : 2);
+        request_full_channel_output(fmt);
+        AMediaFormat_setInt32(fmt, "max-input-size", 32768);
+        AMediaCodec* c = AMediaCodec_createDecoderByType("audio/mpeg");
+        if (!c || AMediaCodec_configure(c, fmt, NULL, NULL, 0) != AMEDIA_OK ||
+            AMediaCodec_start(c) != AMEDIA_OK) {
+            if (c) AMediaCodec_delete(c);
+            AMediaFormat_delete(fmt);
+            d->aconfigured = 1;
+            return -1;
+        }
+        d->acodec = c;
+        AMediaFormat_delete(fmt);
         d->aconfigured = 1;
         return 0;
     }
@@ -1028,8 +1152,8 @@ int basis_decoder_get_video_size(basis_decoder_t* d, int* w, int* h) {
      * sized to the visible region — no pad rows, exact aspect. The crop is only
      * known once the first frame decodes; until then decline so C# keeps polling
      * and latches the RT on the display size rather than the coded one. */
-    int dw = __atomic_load_n(&d->dispW, __ATOMIC_RELAXED);
-    int dh = __atomic_load_n(&d->dispH, __ATOMIC_RELAXED);
+    uint64_t wh = __atomic_load_n(&d->dispWH, __ATOMIC_RELAXED);
+    int dw = (int)(uint32_t)(wh >> 32), dh = (int)(uint32_t)wh;
     if (dw <= 0 || dh <= 0) return -1;
     if (w) *w = dw; if (h) *h = dh; return 0;
 }
@@ -1041,7 +1165,13 @@ int basis_decoder_get_frame_origin(basis_decoder_t* d) { (void)d; return 0; }
 int64_t basis_decoder_get_position_us(basis_decoder_t* d) {
     if (!d) return -1;
     int64_t presented = __atomic_load_n(&d->presentedPosUs, __ATOMIC_RELAXED);
-    return presented >= 0 ? presented : d->lastPtsUs;
+    if (presented >= 0) return presented;
+    if (d->lastPtsUs >= 0) return d->lastPtsUs;
+    /* Audio-only: no video ever presents, so report the audio playback front. */
+    pthread_mutex_lock(&d->pcm.m);
+    int64_t played = d->pcm.playedUs;
+    pthread_mutex_unlock(&d->pcm.m);
+    return played != INT64_MIN ? played : -1;
 }
 int basis_decoder_get_audio_format(basis_decoder_t* d, int* r, int* c) {
     if (!d || !d->aconfigured) return -1; if (r) *r = d->asr ? d->asr : 48000; if (c) *c = d->ach ? d->ach : 2; return 0;

@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Threading;
 using Basis.Network.Core;
 using Basis.Network.Core.Compression;
 using Basis.Scripts.Networking.Compression;
@@ -41,6 +42,42 @@ namespace Basis.Network
             public LocalAvatarSyncMessage Message;
             public byte SequenceByte;
             public float PhaseOffset;
+            // v42 uplink delta state — mirrors the real client: a full keyframe every
+            // UplinkKeyframeIntervalMs on the High channel (which the server snapshots as the
+            // baseline), dirty-mask deltas against it on DeltaAvatarChannel in between.
+            public byte[] Baseline;
+            public byte BaselineSeq;
+            public bool HasBaseline;
+            public long LastKeyframeTicks;
+            public byte[] DeltaScratch;
+            public bool ForceKeyframe;
+            // Per-sender strictly-increasing face counter embedded in the synthetic
+            // AdditionalAvatarData payload; the observer verifies monotonicity per sender.
+            public int FaceCounter;
+            public AdditionalAvatarData[] FaceScratch;
+        }
+
+        // Send v42 uplink deltas like a real client (false = legacy all-keyframe uploads).
+        public static bool UseUplinkDeltas = true;
+        private const int UplinkKeyframeIntervalMs = 500;
+        private static readonly long UplinkKeyframeIntervalTicks = Stopwatch.Frequency * UplinkKeyframeIntervalMs / 1000;
+
+        // Attach a synthetic AdditionalAvatarData (face-tracking shaped: [16][timing][values...])
+        // to every send, mirroring how the real client ships HVR high-frequency variables. The
+        // observer side (MessageHandler) logs when these arrive, so a server+2-client run proves
+        // additional data end-to-end over real UDP. Off by default — this is a load tester.
+        public static bool EmitFaceData = false;
+
+        // BASIS_FACE_SPACING: pin client i at (i * spacing, 1, 0) and stop the random walk, so a
+        // run can hold every sender/receiver pair at an exact distance tier (High ≤10m,
+        // Medium ≤30m, Low ≤50m, VeryLow beyond) to prove tier-dependent stripping live.
+        public static float PinSpacingMeters = 0f;
+
+        /// <summary>Server NACK (DeltaControlUplinkKeyframeRequest) → next send is a keyframe.</summary>
+        public static void RequestKeyframe(int index)
+        {
+            if (ActivePlayerData == null || index < 0 || index >= ActivePlayerData.Length) return;
+            ActivePlayerData[index].ForceKeyframe = true;
         }
 
         // Precompute compressed scale once; reused for all messages.
@@ -53,7 +90,9 @@ namespace Basis.Network
 
             for (int i = 0; i < clientCount; i++)
             {
-                PlayersCurrentPosition[i] = Randomizer.GetRandomOffset();
+                PlayersCurrentPosition[i] = PinSpacingMeters > 0f
+                    ? new Vector3 { x = i * PinSpacingMeters, y = 1f, z = 0f }
+                    : Randomizer.GetRandomOffset();
                 ActivePlayerData[i] = Generate();
             }
         }
@@ -140,19 +179,24 @@ namespace Basis.Network
         {
             if (peer == null) return;
 
+            ref PlayerData pd = ref ActivePlayerData[index];
+
             double time = AnimTimer.Elapsed.TotalSeconds;
-            float phase = ActivePlayerData[index].PhaseOffset;
+            float phase = pd.PhaseOffset;
 
-            // Update position
-            PlayersCurrentPosition[index] += Randomizer.GetRandomOffset();
+            // Update position (held fixed when pinned to a distance tier)
+            if (PinSpacingMeters <= 0f)
+            {
+                PlayersCurrentPosition[index] += Randomizer.GetRandomOffset();
+            }
 
-            var msg = ActivePlayerData[index].Message;
+            var msg = pd.Message;
 
             // 1) Position (first 12 bytes)
             int offset = 0;
             WritePosition(PlayersCurrentPosition[index], ref msg.array, ref offset);
 
-            // 2) Animated bone rotations (natural pose + idle animation)
+            // 2) Animated bone rotations (natural pose + idle animation, all 51 bones fresh per send)
             FakePoseGenerator.WriteBoneRotations(msg.array, RotationRegionOffset, BitQuality.High, time, phase);
 
             // 3) Scale unchanged
@@ -160,17 +204,84 @@ namespace Basis.Network
             // 4) Animated hips rotation
             FakePoseGenerator.WriteCompressedHipsRotation(msg.array, HipsRotationOffset, time, phase);
 
-            // Serialize and send — channel encodes quality (High) and no additional data
-            var writer = ActivePlayerData[index].Writer;
+            byte seq = pd.SequenceByte;
+            unchecked { pd.SequenceByte++; }
+
+            // Face-data test mode: ride one AdditionalAvatarData on this frame, exactly like the
+            // real client ships HVR high-frequency face variables (messageIndex 1, payload
+            // [16][timing][counter…]). The per-sender counter lets the observer verify ordering.
+            bool hasAdditional = false;
+            if (EmitFaceData)
+            {
+                int counter = unchecked((ushort)(++pd.FaceCounter));
+                pd.FaceScratch ??= new AdditionalAvatarData[1];
+                pd.FaceScratch[0] = new AdditionalAvatarData
+                {
+                    messageIndex = 1,
+                    array = new byte[] { 16, 1, (byte)(counter & 0xFF), (byte)((counter >> 8) & 0xFF), 200, 150, 100 },
+                };
+                msg.AdditionalAvatarDatas = pd.FaceScratch;
+                msg.LinkedAvatarIndex = 0;
+                hasAdditional = true;
+            }
+            else
+            {
+                msg.AdditionalAvatarDatas = null;
+                msg.AdditionalAvatarDataSize = 0;
+            }
+
+            long now = Stopwatch.GetTimestamp();
+            bool keyframe = !UseUplinkDeltas
+                || pd.ForceKeyframe
+                || !pd.HasBaseline
+                || pd.Baseline == null
+                || pd.Baseline.Length != msg.array.Length
+                || now - pd.LastKeyframeTicks >= UplinkKeyframeIntervalTicks;
+
+            int deltaLen = -1;
+            if (!keyframe)
+            {
+                int cap = BasisAvatarDeltaCompression.MaxDeltaSize(BitQuality.High);
+                if (pd.DeltaScratch == null || pd.DeltaScratch.Length < cap)
+                    pd.DeltaScratch = new byte[cap];
+                deltaLen = BasisAvatarDeltaCompression.BuildDelta(pd.Baseline, msg.array, BitQuality.High, pd.DeltaScratch, 0);
+                if (deltaLen < 0 || deltaLen >= msg.array.Length) keyframe = true;
+            }
+
+            var writer = pd.Writer;
             writer.Reset();
-            writer.Put(ActivePlayerData[index].SequenceByte);
-            unchecked { ActivePlayerData[index].SequenceByte++; }
-            msg.SerializeForChannel(writer, BitQuality.High);
+            if (keyframe)
+            {
+                // Full keyframe on the High channel — the server snapshots it as this
+                // sender's uplink delta baseline. Odd channel when additional data rides along.
+                writer.Put(seq);
+                msg.SerializeForChannel(writer, BitQuality.High);
+                byte channel = BasisNetworkCommons.GetPlayerAvatarChannelForQuality((int)BitQuality.High, hasAdditional);
+                peer.Send(writer, channel, DeliveryMethod.Unreliable);
 
-            byte channel = BasisNetworkCommons.GetPlayerAvatarChannelForQuality((int)BitQuality.High, false);
-            peer.Send(writer, channel, DeliveryMethod.Unreliable);
+                if (UseUplinkDeltas)
+                {
+                    if (pd.Baseline == null || pd.Baseline.Length != msg.array.Length)
+                        pd.Baseline = new byte[msg.array.Length];
+                    System.Array.Copy(msg.array, pd.Baseline, msg.array.Length);
+                    pd.BaselineSeq = seq;
+                    pd.HasBaseline = true;
+                    pd.LastKeyframeTicks = now;
+                    pd.ForceKeyframe = false;
+                }
+            }
+            else
+            {
+                // v42 uplink delta: [hdr][seq][baseSeq][body][additional?] on DeltaAvatarChannel.
+                writer.Put(BasisNetworkCommons.BuildDeltaHeader((int)BitQuality.High, hasAdditional, false));
+                writer.Put(seq);
+                writer.Put(pd.BaselineSeq);
+                writer.Put(pd.DeltaScratch, 0, deltaLen);
+                if (hasAdditional) msg.SerializeAdditionalOnly(writer);
+                peer.Send(writer, BasisNetworkCommons.DeltaAvatarChannel, DeliveryMethod.Unreliable);
+            }
 
-            ActivePlayerData[index].Message = msg;
+            pd.Message = msg;
         }
 
         public static void WritePosition(Scripts.Networking.Compression.Vector3 position, ref byte[] buffer, ref int offset)

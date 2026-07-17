@@ -164,6 +164,8 @@ public static class BasisAnimationRiggingHelper
         data.PositionRightLowerLeg = BasisLocalRigDriver.ApplyHintBias(Basis.Scripts.TransformBinders.BoneControl.BasisBoneTrackedRole.RightLowerLeg, rightLowerLeg.position, rightLowerLeg.rotation);
 
         // --- Chest ---
+        // Raw (un-hinted) chest for the chest IK target; the hinted one below is a head-solve hint.
+        data.ChestPositionRaw = chest.position;
         data.ChestPosition = BasisLocalRigDriver.ApplyHintBias(Basis.Scripts.TransformBinders.BoneControl.BasisBoneTrackedRole.Chest, chest.position, chest.rotation);
         data.ChestRotation = chest.rotation;
 
@@ -210,6 +212,7 @@ public static class BasisAnimationRiggingHelper
 
         // Shoulder pre-solve defaults
         data.ShoulderSolveEnabled = true;
+        data.ShoulderShrugEnabled = true;
         data.ShoulderElevationFactor = 0.4f;
         data.ShoulderProtractionFactor = 0.3f;
 

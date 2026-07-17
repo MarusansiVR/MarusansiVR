@@ -96,17 +96,30 @@ namespace Basis.EventDriver
         public static event Action OnUpdate;
         public static event Action OnLateUpdate;
 
+        private static Action _onUpdateCachedDelegate;
+        private static Delegate[] _onUpdateInvocationList = System.Array.Empty<Delegate>();
+        private static Action _onLateUpdateCachedDelegate;
+        private static Delegate[] _onLateUpdateInvocationList = System.Array.Empty<Delegate>();
+
         private static void ResetEventCallbacks()
         {
             OnUpdate = null;
             OnLateUpdate = null;
+            _onUpdateCachedDelegate = null;
+            _onUpdateInvocationList = System.Array.Empty<Delegate>();
+            _onLateUpdateCachedDelegate = null;
+            _onLateUpdateInvocationList = System.Array.Empty<Delegate>();
         }
 
-        private static void InvokeEventCallbacks(Action callbacks, string callbackName)
+        private static void InvokeEventCallbacks(Action callbacks, string callbackName, ref Action cachedDelegate, ref Delegate[] cachedInvocationList)
         {
-            if (callbacks == null) return;
+            if (!ReferenceEquals(callbacks, cachedDelegate))
+            {
+                cachedDelegate = callbacks;
+                cachedInvocationList = callbacks == null ? System.Array.Empty<Delegate>() : callbacks.GetInvocationList();
+            }
 
-            Delegate[] invocationList = callbacks.GetInvocationList();
+            Delegate[] invocationList = cachedInvocationList;
             int invocationCount = invocationList.Length;
             for (int index = 0; index < invocationCount; index++)
             {
@@ -234,7 +247,7 @@ namespace Basis.EventDriver
             SMModuleDebugOptions.Simulate();
             Basis.Scripts.Device_Management.EyeTracking.BasisGazeFoveationAutoDriver.Simulate();
             BasisHighPlayerCapPerformanceMode.Simulate();
-            InvokeEventCallbacks(OnUpdate, nameof(OnUpdate));
+            InvokeEventCallbacks(OnUpdate, nameof(OnUpdate), ref _onUpdateCachedDelegate, ref _onUpdateInvocationList);
             timeSinceLastUpdate += DeltaTime;
         }
 
@@ -256,6 +269,39 @@ namespace Basis.EventDriver
                 BasisSceneFactory.Simulate(fixedDeltaTime);
             }
         }
+        // AfterAvatarChanges carries BOTH avatar-content hooks (e.g. HVR eye reads, which run
+        // arbitrary per-avatar code) AND the local avatar transmit (TransmissionResults.Simulate
+        // → Compress → every outgoing avatar/face packet). A bare multicast Invoke lets one
+        // throwing content hook abort every later subscriber — which silently killed all avatar
+        // transmission. Invoke each subscriber under its own catch instead; the invocation list
+        // is cached and only rebuilt when the delegate instance changes.
+        private static Action _afterAvatarChangesCachedDelegate;
+        private static Delegate[] _afterAvatarChangesInvocationList = System.Array.Empty<Delegate>();
+
+        private static void InvokeAfterAvatarChangesSafely()
+        {
+            Action current = BasisNetworkTransmitter.AfterAvatarChanges;
+            if (!ReferenceEquals(current, _afterAvatarChangesCachedDelegate))
+            {
+                _afterAvatarChangesCachedDelegate = current;
+                _afterAvatarChangesInvocationList = current == null ? System.Array.Empty<Delegate>() : current.GetInvocationList();
+            }
+
+            Delegate[] list = _afterAvatarChangesInvocationList;
+            int count = list.Length;
+            for (int Index = 0; Index < count; Index++)
+            {
+                try
+                {
+                    ((Action)list[Index])();
+                }
+                catch (Exception ex)
+                {
+                    BasisDebug.LogErrorOnce($"AfterAvatarChanges subscriber {list[Index].Method?.DeclaringType?.Name}.{list[Index].Method?.Name} failed: {ex}", BasisDebug.LogTag.Event);
+                }
+            }
+        }
+
         /// <summary>
         /// LateUpdate step for device management loop, eye simulation, local player late sim,
         /// microphone updates (client), network apply, and JigglePhysics scheduling/pose/render.
@@ -277,7 +323,7 @@ namespace Basis.EventDriver
 
             // Comms eye/Vixxy/activity actuation is pumped in front of the network-apply barrier so
             // its main-thread cost overlaps the in-flight BasisRemoteNetworkDriver interpolation
-            // jobs (InterpolateBoneRotationsJob + FilterBoneRotationsOneEuroJob), which
+            // jobs (UpdateAllAvatarsJob + InterpolateBoneRotationsJob), which
             // SimulateNetworkApply's Apply() completes below. Vixxy actuates blendshapes/materials,
             // so it must stay ahead of BasisBlendShapeDriver and the render. VariableNetworking is
             // split off to a later barrier (see the AuthoredMotion schedule/complete below) — it
@@ -420,7 +466,7 @@ namespace Basis.EventDriver
 
             // ── Network transmit (reads bone results via GetOutGoingMouth) ──
             ProfileBegin(PROF_NETWORK_TRANSMIT);
-            BasisNetworkTransmitter.AfterAvatarChanges?.Invoke();
+            InvokeAfterAvatarChangesSafely();
             ProfileEnd(PROF_NETWORK_TRANSMIT);
 
             // ── JigglePhysics pose ──
@@ -466,7 +512,7 @@ namespace Basis.EventDriver
                 OnBeforeRender();
             }
 
-            InvokeEventCallbacks(OnLateUpdate, nameof(OnLateUpdate));
+            InvokeEventCallbacks(OnLateUpdate, nameof(OnLateUpdate), ref _onLateUpdateCachedDelegate, ref _onLateUpdateInvocationList);
             ProfileLateUpdateFinish();
         }
         /// <summary>
@@ -485,11 +531,17 @@ namespace Basis.EventDriver
 
             if (BasisLocalPlayer.PlayerReady)
             {
-                BasisLocalPlayer.Instance.SimulateOnRender();
-                Basis.Scripts.Device_Management.EyeTracking.BasisEyeTrackingManager.Simulate();
-                BasisRemoteFaceManagement.Apply();
+                try { BasisLocalPlayer.Instance.SimulateOnRender(); }
+                catch (Exception ex) { BasisDebug.LogErrorOnce($"BasisEventDriver.SimulateOnRender failed: {ex}", BasisDebug.LogTag.Event); }
+
+                try { Basis.Scripts.Device_Management.EyeTracking.BasisEyeTrackingManager.Simulate(); }
+                catch (Exception ex) { BasisDebug.LogErrorOnce($"BasisEventDriver eye-tracking simulate failed: {ex}", BasisDebug.LogTag.Event); }
+
+                try { BasisRemoteFaceManagement.Apply(); }
+                catch (Exception ex) { BasisDebug.LogErrorOnce($"BasisEventDriver remote-face apply failed: {ex}", BasisDebug.LogTag.Event); }
 #if !BASIS_DISABLE_MICROPHONE
-                BasisLocalCameraDriver.Instance.microphoneIconDriver.Simulate(DeltaTime);
+                try { BasisLocalCameraDriver.Instance.microphoneIconDriver.Simulate(DeltaTime); }
+                catch (Exception ex) { BasisDebug.LogErrorOnce($"BasisEventDriver microphone-icon simulate failed: {ex}", BasisDebug.LogTag.Event); }
 #endif
             }
             StateOfOnRenderBefore = false;

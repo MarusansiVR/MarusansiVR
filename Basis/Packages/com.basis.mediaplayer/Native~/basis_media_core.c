@@ -20,7 +20,10 @@
 #include "protocol/basis_rtmp.h"
 #include "protocol/basis_ts.h"
 #include "protocol/basis_mp4.h"
+#include "protocol/basis_webm.h"
+#include "protocol/basis_ogg.h"
 #include "protocol/basis_wav.h"
+#include "protocol/basis_mp3.h"
 #include "protocol/basis_http.h"
 #include "protocol/basis_hls.h"
 #include "protocol/basis_rist.h"
@@ -164,9 +167,13 @@ struct basis_media_engine {
 
     /* In-band CEA-608 caption extraction. video_hevc selects the SEI NAL layout,
      * set from the video format; the context owns the 608 decoder + cue store and
-     * is scanned per AU on the demux thread, polled from the main thread. */
+     * is scanned per AU on the demux thread, polled from the main thread.
+     * video_h26x gates the scan entirely: the caption walker is an Annex-B NAL
+     * walk, and raw VP9/AV1 samples can contain 00 00 01 runs it would misparse
+     * into the 608 decoder. */
     basis_caption_ctx_t* captions;
     int video_hevc;
+    int video_h26x;
 
     /* Set on the first on_video_format announce. Every demuxer announces its
      * track formats before payload, so audio frames arriving with this still
@@ -265,6 +272,7 @@ static void pace_gate(basis_media_engine_t* e, int64_t pts_us) {
 static void sink_video_format(void* user, basis_codec_t codec, const uint8_t* ed, int ed_len, int w, int h) {
     basis_media_engine_t* e = (basis_media_engine_t*)user;
     e->video_hevc = (codec == BASIS_CODEC_H265);
+    e->video_h26x = (codec == BASIS_CODEC_H264 || codec == BASIS_CODEC_H265);
     e->video_format_seen = 1;
     mutex_lock(&e->submit_lock);
     basis_decoder_set_video_format(e->decoder, codec, ed, ed_len, w, h);
@@ -283,8 +291,10 @@ static void sink_video_au(void* user, const uint8_t* au, int len, int64_t pts, i
     basis_decoder_submit_video(e->decoder, au, len, pts, key);
     mutex_unlock(&e->submit_lock);
     /* Extract in-band captions from the same Annex B AU. Independent of the
-     * decoder, so outside submit_lock; the caption context locks its own store. */
-    basis_caption_scan_au(e->captions, au, len, e->video_hevc, pts);
+     * decoder, so outside submit_lock; the caption context locks its own store.
+     * H.26x only — see video_h26x. */
+    if (e->video_h26x)
+        basis_caption_scan_au(e->captions, au, len, e->video_hevc, pts);
     /* CONNECTING/BUFFERING -> PLAYING once the OS decoder is actually producing
      * frames (a few buffered), so the state doesn't sit at Buffering forever. */
     if ((e->state == BASIS_MEDIA_STATE_CONNECTING || e->state == BASIS_MEDIA_STATE_BUFFERING) &&
@@ -700,8 +710,10 @@ static void run_hls(demux_ctx_t* c) {
     c->e->pace_delivery = 1;
     c->sink->on_state(c->sink->user, BASIS_MEDIA_STATE_BUFFERING);
     /* Seeks reposition inside the HLS source (segment granularity) via
-     * basis_media_seek_us -> basis_hls_seek_ms, so the demuxer gets no
-     * byte-level reseek here. */
+     * basis_media_seek_us -> basis_hls_request_seek. There is no byte-level
+     * reseek: the segment producer rebuilds its fetch queue and, at the flushed
+     * boundary, basis_hls_read raises BASIS_READ_REPOSITION so the demuxer drops
+     * its pre-seek state and re-anchors pacing before the target segment plays. */
     mutex_lock(&c->e->lock);
     c->e->active_hls = hls;
     mutex_unlock(&c->e->lock);
@@ -808,11 +820,20 @@ static void run_http_like(demux_ctx_t* c) {
     prefix_src_t ps = { head, head_len, 0, rd, src };
 
     int is_mp4 = looks_like_mp4(head, head_len);
+    int is_webm = head_len >= 4 && head[0] == 0x1A && head[1] == 0x45 &&
+                  head[2] == 0xDF && head[3] == 0xA3; /* EBML magic */
     int is_wav = head_len >= 12 && memcmp(head, "RIFF", 4) == 0 && memcmp(head + 8, "WAVE", 4) == 0;
+    int is_ogg = head_len >= 4 && memcmp(head, "OggS", 4) == 0;
     int is_ts  = (head_len >= 1 && head[0] == 0x47);
-    if (!is_mp4 && !is_wav && !is_ts) {
+    /* MP3 is sniffed last: its magic is only an 11-bit frame sync (plus a leading
+     * "ID3" tag when tagged), the weakest of the container signatures. */
+    int is_mp3 = (head_len >= 3 && memcmp(head, "ID3", 3) == 0) || basis_mp3_sniff(head, head_len);
+    if (!is_mp4 && !is_webm && !is_wav && !is_ogg && !is_ts && !is_mp3) {
         is_mp4 = ends_with_ci(c->parts->path, ".mp4") || ends_with_ci(c->parts->path, ".m4s");
+        is_webm = ends_with_ci(c->parts->path, ".webm");
         is_wav = ends_with_ci(c->parts->path, ".wav");
+        is_ogg = ends_with_ci(c->parts->path, ".opus") || ends_with_ci(c->parts->path, ".ogg");
+        is_mp3 = ends_with_ci(c->parts->path, ".mp3");
     }
 
     /* Paced (VOD): drain the network into a read-ahead ring on a reader thread and
@@ -842,12 +863,14 @@ static void run_http_like(demux_ctx_t* c) {
      * absolute seeks with a ranged refetch; everything else demuxes as before. */
     basis_reseek_fn reseek = NULL;
     void* reseek_ctx = NULL;
+    int64_t stream_size = -1;   /* total body size for the Ogg granule seek; -1 = unknown */
 #if defined(_WIN32)
     http_seek_src_t seek_src = { src, use_readahead ? &ring : NULL, &ps, &c->e->running,
                                  basis_win_http_abort, basis_win_http_reseek };
     if (c->e->paced && basis_win_http_can_reseek(src)) {
         reseek = http_reseek;
         reseek_ctx = &seek_src;
+        stream_size = basis_win_http_content_length(src);
     }
 #elif defined(__ANDROID__)
     http_seek_src_t seek_src = { src, use_readahead ? &ring : NULL, &ps, &c->e->running,
@@ -855,13 +878,20 @@ static void run_http_like(demux_ctx_t* c) {
     if (c->e->paced && basis_jni_https_can_reseek(src)) {
         reseek = http_reseek;
         reseek_ctx = &seek_src;
+        stream_size = basis_jni_https_content_length(src);
     }
 #endif
 
     if (is_mp4)
         basis_mp4_run(c->sink, demux_read, demux_ctx, reseek, reseek_ctx);
+    else if (is_webm)
+        basis_webm_run(c->sink, demux_read, demux_ctx, reseek, reseek_ctx);
     else if (is_wav)
         basis_wav_run(c->sink, demux_read, demux_ctx);
+    else if (is_ogg)
+        basis_ogg_run(c->sink, demux_read, demux_ctx, reseek, reseek_ctx, stream_size);
+    else if (is_mp3)
+        basis_mp3_run(c->sink, demux_read, demux_ctx, reseek, reseek_ctx);
     else
         basis_ts_run(c->sink, demux_read, demux_ctx); /* default to MPEG-TS */
 
@@ -1212,6 +1242,11 @@ BASIS_API int BASIS_CALL basis_media_get_state(basis_media_engine_t* e) {
     return s;
 }
 
+BASIS_API int BASIS_CALL basis_media_probe_video_codec(int codec) {
+    if (codec < BASIS_CODEC_H264 || codec > BASIS_CODEC_AV1) return 0;
+    return basis_decoder_probe_video_codec(codec) ? 1 : 0;
+}
+
 BASIS_API int BASIS_CALL basis_media_get_video_size(basis_media_engine_t* e, int* w, int* h) {
     if (!e || !e->decoder) return -1;
     return basis_decoder_get_video_size(e->decoder, w, h);
@@ -1237,15 +1272,17 @@ BASIS_API int BASIS_CALL basis_media_seek_us(basis_media_engine_t* e, int64_t ta
     if (dur <= 0) return -1;                 /* no seekable timeline (live / unindexed) */
     if (target_us > dur) target_us = dur;
     mutex_lock(&e->lock);
+    /* Publish the seek generation before arming the HLS producer below. Both
+     * the byte-source and HLS legs take this generation on their own demux
+     * thread and re-anchor pacing there (take_seek_common), atomically with
+     * dropping their pre-seek buffers: the byte source via a ranged reseek, the
+     * HLS/TS leg on the BASIS_READ_REPOSITION boundary the segment source raises.
+     * Ordering seek_seq ahead of request_seek keeps the producer from signalling
+     * that boundary before the generation is visible. */
     e->seek_target_us = target_us;
     e->seek_seq++;
     void* hls = e->active_hls;
     int rc = hls ? basis_hls_request_seek(hls, target_us / 1000) : 0;
-    /* HLS repositions inside the segment source — the TS demuxer never sees a
-     * take_seek, so re-anchor pacing here. A stray pre-flush sample can win the
-     * re-anchor, but it costs one more re-anchor when the flushed data lands,
-     * not a stall. */
-    if (hls && rc == 0) e->pace_started = 0;
     mutex_unlock(&e->lock);
     return rc;
 }

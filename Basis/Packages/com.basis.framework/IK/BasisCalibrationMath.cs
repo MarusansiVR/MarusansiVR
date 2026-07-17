@@ -106,8 +106,8 @@ public static class BasisCalibrationMath
     /// <paramref name="eyeReference"/> lifts a backend's tracked point up to the eyes: OpenVR fills it
     /// from SteamVR's eye-to-head transform (BasisInput.CenterEyeVerticalOffset) because it tracks the
     /// HMD pose origin, while a backend whose tracked point is already the center-eye (OpenXR
-    /// centerEyePosition) passes 0. A shortfall in this denominator is exactly what the
-    /// AdditionalPlayerHeight "nudge" is bridging by hand.
+    /// centerEyePosition) passes 0. A shortfall in this denominator is exactly what the additive
+    /// <paramref name="additionalPlayerHeight"/> term bridges.
     /// </summary>
     public static float StandingEyeDenominator(float playerMeasuredHeight, float eyeReference, float additionalPlayerHeight)
     {
@@ -131,6 +131,39 @@ public static class BasisCalibrationMath
             return 1f;
         }
         return avatarScaledMetric / denominator;
+    }
+
+    /// <summary>
+    /// Extra tracking-space lift, in unscaled player metres, that keeps an arm-span-calibrated avatar's
+    /// feet on the floor. Arm-span DeviceScale matches reach rather than eye height, so the scaled head can
+    /// land below the avatar's standing eye and drop the body through the floor; this returns the upward
+    /// lift that, added to the tracking-space yOffset (later multiplied by DeviceScale), lands the scaled
+    /// feet on the floor. Returns 0 when the avatar would float instead — push-up only, never sinks the view.
+    /// </summary>
+    public static float ArmSpanFloorGroundingLift(float avatarUnscaledEye, float appliedUpScale, float deviceScale, float playerMeasuredEye)
+    {
+        if (deviceScale <= 1e-5f)
+        {
+            return 0f;
+        }
+        float desiredUnscaledEye = (avatarUnscaledEye * appliedUpScale) / deviceScale;
+        return Mathf.Max(0f, desiredUnscaledEye - playerMeasuredEye);
+    }
+
+    /// <summary>Arm-to-height ratio range: 0 = eye height, 1 = arm distance. Outside 0..1 the blend keeps
+    /// extrapolating in the same direction, one full eye-to-arm delta past each endpoint (negative goes
+    /// below eye height, above 1 goes past arm distance).</summary>
+    public const float ArmToHeightBlendMin = -1f;
+    public const float ArmToHeightBlendMax = 2f;
+
+    /// <summary>
+    /// Arm-to-height ratio metric: interpolates a measurement between its eye-height value (blend 0) and
+    /// its arm-distance value (blend 1), extrapolating past eye height for negative blends. Applied to the
+    /// player and avatar measurements alike, so 0 and 1 reproduce the pure height modes exactly.
+    /// </summary>
+    public static float BlendEyeSpanMetric(float eyeMetric, float spanMetric, float blend)
+    {
+        return Mathf.LerpUnclamped(eyeMetric, spanMetric, Mathf.Clamp(blend, ArmToHeightBlendMin, ArmToHeightBlendMax));
     }
 
     /// <summary>
@@ -180,5 +213,77 @@ public static class BasisCalibrationMath
     public static bool ShouldRecaptureEyeHeight(bool recapture, bool hasGenuine)
     {
         return recapture || !hasGenuine;
+    }
+
+    /// <summary>Typical height of a foot-worn tracker's origin above the sole/floor. Subtracted from the
+    /// lowest tracker to place the estimated floor under the player's actual feet.</summary>
+    public const float FootMountAllowanceMeters = 0.07f;
+    /// <summary>Trackers within this of the lowest one count as the "foot band". Feet (and ankle straps)
+    /// cluster here; a knee tracker sits well above it.</summary>
+    public const float FootBandMeters = 0.22f;
+    /// <summary>Feet come in pairs: a floor estimate needs at least this many trackers in the foot band,
+    /// so a lone hip/chest puck can never masquerade as the floor.</summary>
+    public const int MinFootBandTrackers = 2;
+
+    /// <summary>
+    /// Floor height inferred from the player's own low trackers: the lowest tracker, minus the mount
+    /// allowance, provided at least <see cref="MinFootBandTrackers"/> trackers sit together in the foot
+    /// band and the implied eye height (hmd - floor) is a plausible human measurement. Because the HMD
+    /// and every tracker carry the SAME vertical play-space shift, measuring the eye against this floor
+    /// cancels ANY such shift — the Basis play-space mover, the arm-span grounding lift, and offsets
+    /// applied outside Basis (an OVRAS/SteamVR space drag) alike — with no offset bookkeeping at all.
+    /// This is what lets the player calibrate wherever they happen to be.
+    /// </summary>
+    public static bool TryEstimateFloorFromTrackers(System.Collections.Generic.IReadOnlyList<float> trackerHeights, float hmdHeight, out float floorHeight)
+    {
+        floorHeight = 0f;
+        if (trackerHeights == null || trackerHeights.Count < MinFootBandTrackers)
+        {
+            return false;
+        }
+
+        float lowest = float.MaxValue;
+        for (int i = 0; i < trackerHeights.Count; i++)
+        {
+            if (trackerHeights[i] < lowest) lowest = trackerHeights[i];
+        }
+
+        int inFootBand = 0;
+        for (int i = 0; i < trackerHeights.Count; i++)
+        {
+            if (trackerHeights[i] <= lowest + FootBandMeters) inFootBand++;
+        }
+        if (inFootBand < MinFootBandTrackers)
+        {
+            return false;
+        }
+
+        floorHeight = lowest - FootMountAllowanceMeters;
+        float impliedEye = hmdHeight - floorHeight;
+        return impliedEye >= BasisHeightDriver.MinPlausibleBodyMeasure
+            && impliedEye <= BasisHeightDriver.MaxPlausibleBodyMeasure;
+    }
+
+    /// <summary>
+    /// How much taller the eye-implied body may read than the span-implied body before the eye
+    /// measurement is treated as lift-poisoned. Wider than <see cref="AutoModeEyePreferenceBand"/> on
+    /// purpose: short-armed players legitimately sit above the auto-mode band, but an eye measurement
+    /// taken while the play space was shifted up reads far outside anything anatomy produces.
+    /// </summary>
+    public const float EyeOverSpanPersistBand = 1.15f;
+
+    /// <summary>
+    /// True when an eye-height measurement is anatomically impossible against the measured arm span —
+    /// the signature of calibrating while vertically shifted (space drag, grounding lift, external
+    /// offset). The span cannot over-measure, so an eye that implies a body far taller than the span
+    /// implies was measured too high, and must not be persisted as the player's body size.
+    /// </summary>
+    public static bool EyeHeightLooksLiftPoisoned(float playerEye, float playerSpan)
+    {
+        if (playerEye <= 0f || playerSpan <= 0f)
+        {
+            return false;
+        }
+        return ImpliedHeightFromEye(playerEye) > ImpliedHeightFromSpan(playerSpan) * EyeOverSpanPersistBand;
     }
 }

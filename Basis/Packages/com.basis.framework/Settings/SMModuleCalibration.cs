@@ -10,11 +10,10 @@ using UnityEngine.Animations.Rigging;
 public class SMModuleCalibration : BasisSettingsBase
 {
     public static BasisSelectedHeightMode HeightMode = BasisSelectedHeightMode.Auto;
-    public static BasisIKLockMode CurrentIKLockMode = BasisIKLockMode.LockBoth;
+    public static BasisIKLockMode CurrentIKLockMode = BasisIKLockMode.LockHead;
     public static bool ApplyCustomScale = false;
     public static float SelectedScale = 1.6f;
     public static float SelectedEyeHeight = 1.61f;
-    public static bool PitchCalibrationEnabled = false;
 
     /// <summary>
     /// Per-sphere calibration scale multipliers. Default is 1.0 for each role.
@@ -46,11 +45,8 @@ public class SMModuleCalibration : BasisSettingsBase
     private static string K_CUSTOM_SCALE => BasisSettingsDefaults.CustomScale.BindingKey;         // "custom scale"
     private static string K_SELECTED_SCALE => BasisSettingsDefaults.SelectedScale.BindingKey;     // "selected scale"
     private static string K_REALWORLD_EYE_HEIGHT => BasisSettingsDefaults.realworldeyeheight.BindingKey; // "real world eye height"
-    private static string K_PITCH_CALIBRATION => BasisSettingsDefaults.PitchCalibration.BindingKey;     // "pitchcalibration"
-    private static string K_STANDING_EYE_CORRECTION => BasisSettingsDefaults.CalibrationStandingEyeHeightMeters.BindingKey; // "calibrationstandingeyeheightmeters"
-    private static string K_ENABLE_STANDING_EYE_CORRECTION => BasisSettingsDefaults.EnableStandingEyeHeightCorrection.BindingKey; // "enablestandingeyeheightcorrection"
-    private static string K_ADDITIONAL_PLAYER_HEIGHT => BasisSettingsDefaults.AdditionalPlayerHeight.BindingKey; // "additionalplayerheight"
-    private static string K_ENABLE_STANDING_HEIGHT_NUDGE => BasisSettingsDefaults.EnableStandingHeightNudge.BindingKey; // "enablestandingheightnudge"
+    private static string K_ENABLE_ARM_TO_HEIGHT_BLEND => BasisSettingsDefaults.EnableArmToHeightBlend.BindingKey; // "enablearmtoheightblend"
+    private static string K_ARM_TO_HEIGHT_BLEND => BasisSettingsDefaults.ArmToHeightBlend.BindingKey;              // "armtoheightblend"
 
     // One Euro globals
     private static string K_FBIK_MINCUTOFF => BasisSettingsDefaults.FBIKMinCutoff.BindingKey;                 // "fbikmincutoff"
@@ -159,6 +155,7 @@ public class SMModuleCalibration : BasisSettingsBase
     private static string K_FBIK_HAND_RADIUS => BasisSettingsDefaults.FBIKHandRadius.BindingKey;
     private static string K_FBIK_HAND_SKIN => BasisSettingsDefaults.FBIKHandSkin.BindingKey;
     private static string K_FBIK_SHOULDER_SOLVE => BasisSettingsDefaults.FBIKShoulderSolveEnabled.BindingKey;
+    private static string K_FBIK_SHOULDER_SHRUG => BasisSettingsDefaults.FBIKShoulderShrug.BindingKey;
     private static string K_FBIK_SHOULDER_ELEVATION => BasisSettingsDefaults.FBIKShoulderElevation.BindingKey;
     private static string K_FBIK_SHOULDER_PROTRACTION => BasisSettingsDefaults.FBIKShoulderProtraction.BindingKey;
     private static string K_FBIK_MAX_BEND_DEG => BasisSettingsDefaults.FBIKMaxBendDeg.BindingKey;
@@ -306,27 +303,14 @@ public class SMModuleCalibration : BasisSettingsBase
                     break;
                 }
 
-            case var s when s == K_PITCH_CALIBRATION:
-                if (bool.TryParse(optionValue, out var pitchVal))
-                {
-                    PitchCalibrationEnabled = pitchVal;
-                }
-                break;
-
-            case var s when s == K_STANDING_EYE_CORRECTION:
-                // Persistent standing eye-height correction changed: re-apply height/scale now so
-                // DeviceScale picks up the new denominator. Applied directly (not via the _dirty path,
-                // which only re-applies on height-mode/scale/custom-scale changes).
+            case var s when s == K_ENABLE_ARM_TO_HEIGHT_BLEND:
+                // Toggling the arm-to-height ratio swaps the scaling metric pair: re-apply height/scale
+                // now so DeviceScale picks up the new denominator. Applied directly (not via the _dirty
+                // path, which only re-applies on height-mode/scale/custom-scale changes).
                 BasisHeightDriver.ApplyScaleAndHeight();
                 break;
 
-            case var s when s == K_ENABLE_STANDING_EYE_CORRECTION:
-                // Toggling the correction on/off flips whether the stored metres apply; re-apply now.
-                BasisHeightDriver.ApplyScaleAndHeight();
-                break;
-
-            case var s when s == K_ADDITIONAL_PLAYER_HEIGHT || s == K_ENABLE_STANDING_HEIGHT_NUDGE:
-                // Standing-height nudge value or its gate changed: re-apply so the DeviceScale denominator updates.
+            case var s when s == K_ARM_TO_HEIGHT_BLEND:
                 BasisHeightDriver.ApplyScaleAndHeight();
                 break;
 
@@ -641,6 +625,10 @@ public class SMModuleCalibration : BasisSettingsBase
 
             case var s when s == K_FBIK_SHOULDER_SOLVE:
                 if (bool.TryParse(optionValue, out var ssVal)) ApplyIKDataBool((ref BasisFullBodyData d) => d.ShoulderSolveEnabled = ssVal);
+                break;
+
+            case var s when s == K_FBIK_SHOULDER_SHRUG:
+                if (bool.TryParse(optionValue, out var shrugVal)) ApplyIKDataBool((ref BasisFullBodyData d) => d.ShoulderShrugEnabled = shrugVal);
                 break;
 
             case var s when s == K_FBIK_SHOULDER_ELEVATION:

@@ -72,6 +72,7 @@ namespace Basis.Scripts.Networking.Sync
         private byte[] _dirtyMask;
         private byte[] _scratch;
         private byte[] _sendBuffer;
+        private ushort[] _snapshotRecipient;
 
         private bool _schemaLocked;
         private bool _buffersReady;
@@ -84,6 +85,8 @@ namespace Basis.Scripts.Networking.Sync
         private float _rotDotThreshold = 0.99999f;
         private int _idleKeyframeBackoff;
         private const int MaxKeyframeBackoffShift = 4;
+        private int _idleKeyframesAtCap;
+        private const int MaxIdleKeyframesAtCap = 2;
         private bool _lastSendWasIdle;
         private ushort _lastKnownOwnerId;
         private bool _haveKnownOwner;
@@ -104,6 +107,7 @@ namespace Basis.Scripts.Networking.Sync
         internal void AdvanceReceiver(float dt) => _receiver?.Advance(dt);
 
         internal bool WantsMainThreadApply;
+        internal bool JobApplied;
         internal int TeleportWatchStart;
         internal int TeleportWatchCount;
 
@@ -111,6 +115,41 @@ namespace Basis.Scripts.Networking.Sync
         {
             if (_receiver != null && _receiver.HasData && !IsOwnedLocallyOnClient)
                 ApplyInterpolated();
+        }
+
+        /// <summary>
+        /// Describes how the Burst apply job should drive this object's transform, with indices as this
+        /// object's own schema offsets (the driver rebases them into the shared pools). Returning false
+        /// leaves the object entirely on the main-thread <see cref="ApplyInterpolated"/> path;
+        /// <paramref name="replacesMainThreadApply"/> additionally suppresses the main-thread call when
+        /// the binding covers everything it would do (a BindTransform binding does not — both ran before
+        /// and still do). Evaluated at every layout rebuild; call
+        /// <see cref="BasisSyncDriver.MarkLayoutDirty"/> after changing what it depends on.
+        /// </summary>
+        internal virtual bool TryGetJobApplyBinding(out BasisSyncApplyBinding binding, out Transform target, out bool replacesMainThreadApply)
+        {
+            binding = BasisSyncApplyBinding.Empty;
+            target = BoundTransform;
+            replacesMainThreadApply = false;
+            if (!HasTransformBinding || BoundTransform == null) return false;
+
+            if (BindPosFieldIndex >= 0)
+            {
+                int off = _schema.GetField(BindPosFieldIndex).Offset;
+                binding.PosX = off;
+                binding.PosY = off + 1;
+                binding.PosZ = off + 2;
+            }
+            if (BindRotFieldIndex >= 0) binding.RotQuat = _schema.GetField(BindRotFieldIndex).Offset;
+            if (BindScaleFieldIndex >= 0)
+            {
+                int off = _schema.GetField(BindScaleFieldIndex).Offset;
+                binding.ScaleX = off;
+                binding.ScaleY = off + 1;
+                binding.ScaleZ = off + 2;
+            }
+            binding.World = (byte)(BindWorldSpace ? 1 : 0);
+            return binding.HasAny;
         }
 
         /// <summary>Driver-driven (post-interpolation, main thread) apply hook for remote objects that compose their own output.</summary>
@@ -471,7 +510,37 @@ namespace Basis.Scripts.Networking.Sync
 
         public override void OnPlayerJoined(BasisNetworkPlayer player)
         {
-            _forceKeyframe = true;
+            if (IsOwnedLocallyOnClient)
+            {
+                _forceKeyframe = true;
+                return;
+            }
+
+            if (player == null || _receiver == null || !_receiver.HasData) return;
+            if (HasPresentOwner()) return;
+            if (BasisNetworkConnection.TryGetLocalPlayerID(out ushort localId) && localId == player.playerId) return;
+            SendStateSnapshotTo(player.playerId);
+        }
+
+        private bool HasPresentOwner()
+            => BasisNetworkPlayers.OwnershipPairing.TryGetValue(clientIdentifier, out ushort ownerId)
+               && BasisNetworkPlayers.GetPlayerById(ownerId, out _);
+
+        private void SendStateSnapshotTo(ushort playerId)
+        {
+            if (!HasNetworkID) return;
+            EnsureBuffers();
+            OnBeforeTransmit();
+
+            unchecked { _seq++; }
+            ushort intervalMs = (ushort)math.clamp((int)math.round(SendIntervalSeconds * 1000.0), 1, 65535);
+            int len = BasisSyncCodec.Serialize(_schema, _local, true, _dirtyMask, _seq, intervalMs, _scratch, UseChecksum);
+
+            if (_sendBuffer == null || _sendBuffer.Length != len) _sendBuffer = new byte[len];
+            Array.Copy(_scratch, 0, _sendBuffer, 0, len);
+            if (_snapshotRecipient == null) _snapshotRecipient = new ushort[1];
+            _snapshotRecipient[0] = playerId;
+            SendCustomNetworkEvent(_sendBuffer, KeyframeDelivery, _snapshotRecipient);
         }
 
         public override void OnNetworkMessage(ushort playerID, byte[] buffer, DeliveryMethod deliveryMethod)
@@ -538,9 +607,6 @@ namespace Basis.Scripts.Networking.Sync
             bool intervalElapsed = _lastSendTime <= 0 || (time - _lastSendTime) >= effectiveInterval;
             if (!intervalElapsed) return;
 
-            double effectiveKeyframe = KeyframeBackoffInterval(keyframeInterval, _idleKeyframeBackoff, MaxKeyframeBackoffShift);
-            bool keyframe = _forceKeyframe || _lastSendTime <= 0 || (time - _lastKeyframeTime) >= effectiveKeyframe;
-
             int dirtyBytes = _schema.DirtyMaskBytes;
             for (int i = 0; i < dirtyBytes; i++) _dirtyMask[i] = 0;
 
@@ -555,9 +621,14 @@ namespace Basis.Scripts.Networking.Sync
                 if (_schema.GetField(fi).Pool == BasisSyncPool.Discrete) discreteChange = true;
             }
 
+            double effectiveKeyframe = KeyframeBackoffInterval(keyframeInterval, _idleKeyframeBackoff, MaxKeyframeBackoffShift);
+            bool periodicDue = (time - _lastKeyframeTime) >= effectiveKeyframe
+                && (anyChange || !IdleKeyframesExhausted(_idleKeyframeBackoff, MaxKeyframeBackoffShift, _idleKeyframesAtCap, MaxIdleKeyframesAtCap));
+            bool keyframe = _forceKeyframe || _lastSendTime <= 0 || periodicDue;
+
             if (discreteChange) keyframe = true;
             if (!keyframe && !anyChange) return;
-            if (anyChange) _idleKeyframeBackoff = 0;
+            if (anyChange) { _idleKeyframeBackoff = 0; _idleKeyframesAtCap = 0; }
 
             double elapsed = _lastSendTime > 0 ? StampInterval(time - _lastSendTime, effectiveInterval, _lastSendWasIdle) : baseInterval;
             ushort intervalMs = (ushort)math.clamp((int)math.round(elapsed * 1000.0), 1, 65535);
@@ -582,9 +653,22 @@ namespace Basis.Scripts.Networking.Sync
             {
                 _lastKeyframeTime = time;
                 _forceKeyframe = false;
-                if (!anyChange && _idleKeyframeBackoff < MaxKeyframeBackoffShift) _idleKeyframeBackoff++;
+                if (!anyChange)
+                {
+                    if (_idleKeyframeBackoff < MaxKeyframeBackoffShift) _idleKeyframeBackoff++;
+                    else if (_idleKeyframesAtCap < MaxIdleKeyframesAtCap) _idleKeyframesAtCap++;
+                }
             }
         }
+
+        /// <summary>
+        /// True once an idle owner has delivered the whole backoff ladder plus <paramref name="maxAtCap"/>
+        /// keyframes at the capped interval. Keyframes are reliable, so remotes hold the converged state
+        /// without further re-sends; late joiners are covered by OnPlayerJoined (forced keyframe/snapshot)
+        /// and any change resets both counters.
+        /// </summary>
+        public static bool IdleKeyframesExhausted(int idleCount, int maxShift, int atCapCount, int maxAtCap)
+            => idleCount >= maxShift && atCapCount >= maxAtCap;
 
         /// <summary>
         /// Keyframe interval stretched by an idle backoff: after <paramref name="idleCount"/> consecutive keyframes
@@ -645,6 +729,7 @@ namespace Basis.Scripts.Networking.Sync
                 // interpolate across it.
                 _lastSendTime = 0;
                 _idleKeyframeBackoff = 0;
+                _idleKeyframesAtCap = 0;
                 _lastSendWasIdle = false;
             }
             else

@@ -39,6 +39,11 @@ internal static class BasisNativeMedia
         [MarshalAs(UnmanagedType.LPStr)] string audioUrl,
         int deliveryHint);
 
+    // Wide string: the path can contain non-ANSI characters (a project under a
+    // localized directory), which LPStr/LoadLibraryA would mangle.
+    [DllImport(Lib, CallingConvention = CallingConvention.StdCall, CharSet = CharSet.Unicode)]
+    private static extern void basis_decoder_set_opus_library_path([MarshalAs(UnmanagedType.LPWStr)] string path);
+
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
     private static extern void basis_media_close(IntPtr engine);
 
@@ -132,10 +137,45 @@ internal static class BasisNativeMedia
     [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
     private static extern int basis_media_poll_caption(IntPtr engine, byte[] buf, int bufSize, out long startUs, out long endUs);
 
+    [DllImport(Lib, CallingConvention = CallingConvention.StdCall)]
+    private static extern int basis_media_probe_video_codec(int codec);
+
     // ---- Managed wrappers (translate the flat ABI into friendlier types) ----
+
+    private static bool _opusLibrarySet;
+    private static readonly object OpusLibraryLock = new object();
+
+    // Opus decode (WebM A_OPUS) runtime-loads the libopus that
+    // com.avionblock.opussharp ships. In the Windows Editor that DLL lives under
+    // Packages/…; a standalone build flattens it next to this plugin, where the
+    // native side finds it by name, so only the Editor needs the explicit path.
+    // Resolved once before the first open; a no-op if opussharp is absent. Locked
+    // and the flag set only after the setter runs, so a concurrent Open can't race
+    // past configuration and strand the native loader on its by-name fallback.
+    private static void EnsureOpusLibrary()
+    {
+        lock (OpusLibraryLock)
+        {
+            if (_opusLibrarySet) return;
+#if UNITY_EDITOR_WIN
+            try
+            {
+                string rid = RuntimeInformation.ProcessArchitecture == Architecture.Arm64
+                    ? "win-arm64" : "win-x64";
+                string path = System.IO.Path.GetFullPath(
+                    $"Packages/com.avionblock.opussharp/Plugins/{rid}/native/opus.dll");
+                if (System.IO.File.Exists(path))
+                    basis_decoder_set_opus_library_path(path);
+            }
+            catch { /* opussharp absent / path unresolved: native falls back to opus.dll */ }
+#endif
+            _opusLibrarySet = true;
+        }
+    }
 
     public static IntPtr Open(string url)
     {
+        EnsureOpusLibrary();
         try
         {
             return basis_media_open(url);
@@ -159,6 +199,7 @@ internal static class BasisNativeMedia
     public static IntPtr OpenWithAudio(string videoUrl, string audioUrl, BasisMediaDelivery delivery)
     {
         if (string.IsNullOrEmpty(audioUrl) && delivery == BasisMediaDelivery.Auto) return Open(videoUrl);
+        EnsureOpusLibrary();
         try
         {
             return basis_media_open_dual(videoUrl, audioUrl, (int)delivery);
@@ -219,6 +260,22 @@ internal static class BasisNativeMedia
         if (e == IntPtr.Zero) return false;
         try { return basis_media_seek_us(e, targetUs) == 0; }
         catch (EntryPointNotFoundException) { return false; }
+    }
+
+    // 1 when this platform decodes the codec, verified as far as the platform
+    // allows: Windows checks the decoder MFT AND the GPU's decode profile;
+    // Android checks decoder presence (hardware-universal for these codecs on
+    // the Quest target). Engine-less and thread-safe; the native side caches
+    // the verdict per process. Binaries that predate the export answer as they
+    // behaved before the probe existed: H.264/H.265 decode, VP9/AV1 don't.
+    public static bool ProbeVideoCodec(int codec)
+    {
+        try { return basis_media_probe_video_codec(codec) != 0; }
+        catch (EntryPointNotFoundException) { return codec == 1 || codec == 2; }
+        // Missing plugin: answer false rather than aborting the caller (a
+        // resolver probes before playback; Open() is where the descriptive
+        // build-instructions error surfaces).
+        catch (DllNotFoundException) { return false; }
     }
 
     public static string GetLastError(IntPtr e)

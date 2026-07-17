@@ -249,15 +249,14 @@ public static class BasisNetworkModeration
                     BasisMainMenu.Close();
                 }
             });
-            BasisDebug.LogError(message);
+            BasisDebug.Log(message);
         }
     }
 
     /// <summary>
     /// Like <see cref="DisplayMessage"/> but adds an "open folder" button that reveals
-    /// <paramref name="folderPath"/> in the OS file browser. This is an informational popup
-    /// (e.g. "logs saved"), so unlike <see cref="DisplayMessage"/> it does not log at error
-    /// level — the caller logs at whatever level fits.
+    /// <paramref name="folderPath"/> in the OS file browser. As with <see cref="DisplayMessage"/>,
+    /// the popup itself is not an error — the caller logs at whatever level fits.
     /// </summary>
     public static void DisplayMessageWithFolder(string message, string folderPath)
     {
@@ -776,8 +775,18 @@ public static class BasisNetworkModeration
     /// </summary>
     public static bool GlobalImagesLocked { get; private set; }
 
+    /// <summary>
+    /// Server-pushed disable of remote end-effector IK anchoring. While true, clients stop two-bone-IK
+    /// anchoring remote avatars' tracked hands/feet and fall back to pure-FK playback. Default false
+    /// (feature on); mirrored to <see cref="BasisNetworkReceiver.EndEffectorIKEnabled"/> on parse.
+    /// </summary>
+    public static bool GlobalEndEffectorIKDisabled { get; private set; }
+
     /// <summary>Fired when the shared-image lock flag changes.</summary>
     public static event Action<bool> OnGlobalImagesLockedChanged;
+
+    /// <summary>Fired when the remote end-effector IK disable flag changes (true = disabled).</summary>
+    public static event Action<bool> OnGlobalEndEffectorIKDisabledChanged;
 
     /// <summary>
     /// True when the local player holds the global-lock moderation permission (or the '*' wildcard),
@@ -888,7 +897,19 @@ public static class BasisNetworkModeration
                 OnGlobalImagesLockedChanged?.Invoke(GlobalImagesLocked);
             }
         }
-        BasisDebug.Log($"Global lock state updated - Avatars: {GlobalAvatarsLocked}, Props: {GlobalPropsLocked}, Worlds: {GlobalWorldsLocked}, Servers: {GlobalServersLocked}, ThirdPerson: {GlobalThirdPersonDisabled}, AdditionalAvatarData: {GlobalAdditionalAvatarDataLock}, CameraMask: {GlobalCameraDisallowMask}, Restriction: {GlobalUserRestrictionMode}, PlayspaceMover: {GlobalPlayspaceMoverLocked}, DirectConnect: {GlobalDirectConnectLocked}, Cilbox: {GlobalCilboxLocked}, Images: {GlobalImagesLocked}", BasisDebug.LogTag.Networking);
+        // EndEffectorIKDisabled appended after ImagesLocked — same back-compat trick. Default off (feature
+        // on). Mirror onto the receiver static so all remote playback picks up the server-wide state.
+        if (reader.AvailableBytes >= 1)
+        {
+            bool nextEndEffectorIKDisabled = reader.GetBool();
+            if (nextEndEffectorIKDisabled != GlobalEndEffectorIKDisabled)
+            {
+                GlobalEndEffectorIKDisabled = nextEndEffectorIKDisabled;
+                BasisNetworkReceiver.EndEffectorIKEnabled = !nextEndEffectorIKDisabled;
+                OnGlobalEndEffectorIKDisabledChanged?.Invoke(GlobalEndEffectorIKDisabled);
+            }
+        }
+        BasisDebug.Log($"Global lock state updated - Avatars: {GlobalAvatarsLocked}, Props: {GlobalPropsLocked}, Worlds: {GlobalWorldsLocked}, Servers: {GlobalServersLocked}, ThirdPerson: {GlobalThirdPersonDisabled}, AdditionalAvatarData: {GlobalAdditionalAvatarDataLock}, CameraMask: {GlobalCameraDisallowMask}, Restriction: {GlobalUserRestrictionMode}, PlayspaceMover: {GlobalPlayspaceMoverLocked}, DirectConnect: {GlobalDirectConnectLocked}, Cilbox: {GlobalCilboxLocked}, Images: {GlobalImagesLocked}, EndEffectorIKDisabled: {GlobalEndEffectorIKDisabled}", BasisDebug.LogTag.Networking);
         OnGlobalLockStateChanged?.Invoke(GlobalAvatarsLocked, GlobalPropsLocked, GlobalWorldsLocked, GlobalServersLocked);
     }
 
@@ -979,6 +1000,15 @@ public static class BasisNetworkModeration
     public static void GlobalToggleImages()
     {
         SendAdminRequest(AdminRequestMode.GlobalToggleImages);
+    }
+
+    /// <summary>
+    /// Admin: toggle remote end-effector IK anchoring server-wide. Server flips the flag and
+    /// broadcasts the new lock state; every client mirrors it onto BasisNetworkReceiver.
+    /// </summary>
+    public static void GlobalToggleEndEffectorIK()
+    {
+        SendAdminRequest(AdminRequestMode.GlobalToggleEndEffectorIK);
     }
 
     /// <summary>

@@ -471,6 +471,14 @@
       "value": "Automatically fix incompatible avatar materials on load."
     },
     {
+      "key": "settings.developer.shaderBlocklist.tooltip",
+      "value": "Replace materials whose shader name or keywords match the blocklist with the fallback material. Applies to newly loaded content."
+    },
+    {
+      "key": "settings.developer.shaderBlocklistPatterns.tooltip",
+      "value": "Comma-separated, case-insensitive substrings matched against shader names and material keywords."
+    },
+    {
       "key": "settings.developer.graphicsStatePrewarm.tooltip",
       "value": "Cache and pre-create full GPU pipeline states to reduce hitches on repeat loads."
     },
@@ -481,10 +489,6 @@
     {
       "key": "settings.developer.console.tooltip",
       "value": "Show the in-app developer console on this page."
-    },
-    {
-      "key": "settings.developer.euroFilter.tooltip",
-      "value": "Show controls for tuning the network smoothing filter."
     },
     {
       "key": "settings.developer.netStats.tooltip",
@@ -569,18 +573,6 @@
     {
       "key": "calibration.calibrate.tooltip",
       "value": "Start full-body calibration; pull both triggers while standing in a T-pose."
-    },
-    {
-      "key": "calibration.decreaseHeight.tooltip",
-      "value": "Nudge your standing height down a little. Adjusts how tall you stand after calibration; it does not resize the avatar."
-    },
-    {
-      "key": "calibration.increaseHeight.tooltip",
-      "value": "Nudge your standing height up a little. Adjusts how tall you stand after calibration; it does not resize the avatar."
-    },
-    {
-      "key": "calibration.pitchLabel.tooltip",
-      "value": "Use a look up, down, and forward sequence for more accurate height calibration."
     },
     {
       "key": "calibration.bodyTrackingSettings.tooltip",
@@ -673,6 +665,10 @@
     {
       "key": "settings.bodyTracking.shoulderSolve.title.tooltip",
       "value": "Let shoulders rotate and shift naturally as your arms move."
+    },
+    {
+      "key": "settings.bodyTracking.shoulderShrug.title.tooltip",
+      "value": "Raise your shoulders when you shrug with your arms at your sides."
     },
     {
       "key": "settings.bodyTracking.shoulderElevation.title.tooltip",
@@ -1213,18 +1209,6 @@
     {
       "key": "ui.advanced.tooltip",
       "value": "Show advanced settings with extra options for fine tuning."
-    },
-    {
-      "key": "settings.network.euro.minCutoff.tooltip",
-      "value": "Lowest smoothing applied to network movement; smaller values steady slow motion but add a little lag."
-    },
-    {
-      "key": "settings.network.euro.beta.tooltip",
-      "value": "How quickly smoothing eases off during fast movement to reduce lag."
-    },
-    {
-      "key": "settings.network.euro.derivativeCutoff.tooltip",
-      "value": "Smoothing applied to speed changes, helping suppress jitter during quick direction shifts."
     },
     {
       "key": "settings.perf.sessionBypass.toggle.tooltip",
@@ -2191,26 +2175,6 @@
       "value": "Pull Triggers to Calibrate"
     },
     {
-      "key": "calibration.decreaseHeight",
-      "value": "Decrease Height"
-    },
-    {
-      "key": "calibration.increaseHeight",
-      "value": "Increase Height"
-    },
-    {
-      "key": "calibration.nudgeStandingHeight",
-      "value": "Nudge Standing Height"
-    },
-    {
-      "key": "calibration.nudgeStandingHeight.tooltip",
-      "value": "Manually raise or lower your calibrated standing height in small steps."
-    },
-    {
-      "key": "calibration.nudgeWarning",
-      "value": "Warning: nudging over 0.2 m can throw off tracker matching."
-    },
-    {
       "key": "calibration.lockInGuides",
       "value": "Show Lock-In Guides"
     },
@@ -2223,22 +2187,6 @@
       "value": "Body Tracking Settings"
     },
     {
-      "key": "calibration.pitchLabel",
-      "value": "Pitch Calibration: {0}"
-    },
-    {
-      "key": "calibration.pitch.up",
-      "value": "Look UP, pull triggers"
-    },
-    {
-      "key": "calibration.pitch.down",
-      "value": "Look DOWN, pull triggers"
-    },
-    {
-      "key": "calibration.pitch.forward",
-      "value": "Look FORWARD, pull triggers"
-    },
-    {
       "key": "calibration.reset",
       "value": "Reset Calibration"
     },
@@ -2249,6 +2197,22 @@
     {
       "key": "calibration.resetConfirm",
       "value": "Reset all calibration settings to defaults? You will need to recalibrate full-body tracking afterwards."
+    },
+    {
+      "key": "calibration.mirror",
+      "value": "Show Mirror"
+    },
+    {
+      "key": "calibration.mirror.tooltip",
+      "value": "A see-through mirror that shows only your avatar and the calibration trackers, so you can line up your pucks without closing the menu."
+    },
+    {
+      "key": "calibration.mirror.larger",
+      "value": "Mirror Larger"
+    },
+    {
+      "key": "calibration.mirror.smaller",
+      "value": "Mirror Smaller"
     },
     {
       "key": "menu.servers.source.savedServers",
@@ -5075,6 +5039,23 @@
       "value": "Forces hip-to-chest twist to distribute 75% upper chest / 25% spine — the real anatomical ratio for axial rotation."
     },
     {
+      "key": "settings.bodyTracking.anat.spineRom.title",
+      "value": "Anatomical Spine Limits"
+    },
+    {
+      "key": "settings.bodyTracking.anat.spineRom.description",
+      "value": "Holds each spine bone inside the range of motion of the real vertebrae it stands for — the lumbar barely twists, the chest barely folds, the neck is free. Stops impossible spine poses."
+    },
+    {
+      "key": "settings.bodyTracking.anat.chestIkTarget.title",
+      "value": "Chest IK Target"
+    },
+    {
+      "key": "settings.bodyTracking.anat.chestIkTarget.description",
+      "value": "Places the chest at its own target instead of leaving it wherever the head solve happens to put it, so the torso follows your real chest (or a chest tracker) more faithfully. The head stays exactly on the headset."
+    },
+
+    {
       "key": "settings.bodyTracking.anat.legSwivelSmoothing.title",
       "value": "Leg Swivel Smoothing"
     },
@@ -5189,6 +5170,14 @@
     {
       "key": "settings.bodyTracking.shoulderSolve.description",
       "value": "Raises and protracts shoulders based on hand target position before arm IK runs."
+    },
+    {
+      "key": "settings.bodyTracking.shoulderShrug.title",
+      "value": "Shoulder Shrug"
+    },
+    {
+      "key": "settings.bodyTracking.shoulderShrug.description",
+      "value": "Detects a shrug from the hands or elbow trackers while your arms hang at your sides and raises the shoulders to match. Default: on"
     },
     {
       "key": "settings.bodyTracking.shoulderElevation.title",
@@ -6487,6 +6476,22 @@
       "value": "Replace broken or unsupported shaders with the URP fallback shader. Off by default; mainly needed during graphics API changes."
     },
     {
+      "key": "settings.developer.shaderBlocklist",
+      "value": "Shader Blocklist"
+    },
+    {
+      "key": "settings.developer.shaderBlocklist.description",
+      "value": "Force the fallback material on any material whose shader name or shader keywords match a user-defined pattern list. Off by default; applies to avatars, props, and worlds as they load."
+    },
+    {
+      "key": "settings.developer.shaderBlocklistPatterns",
+      "value": "Blocked Shader Patterns"
+    },
+    {
+      "key": "settings.developer.shaderBlocklistPatterns.description",
+      "value": "Comma-separated list of case-insensitive substrings matched against shader names and material shader keywords."
+    },
+    {
       "key": "settings.developer.graphicsStatePrewarm",
       "value": "Pipeline State Prewarm"
     },
@@ -6639,14 +6644,6 @@
       "value": "Show inline console log output."
     },
     {
-      "key": "settings.developer.euroFilter",
-      "value": "Network Euro Filter"
-    },
-    {
-      "key": "settings.developer.euroFilter.description",
-      "value": "Show One Euro filter tuning for remote interpolation."
-    },
-    {
       "key": "settings.developer.netStats",
       "value": "Network & Statistics"
     },
@@ -6797,18 +6794,6 @@
     {
       "key": "settings.developer.assignedTrackers.description",
       "value": "List every input device that has been assigned a tracked bone role."
-    },
-    {
-      "key": "settings.network.euro.minCutoff",
-      "value": "Min Cutoff"
-    },
-    {
-      "key": "settings.network.euro.beta",
-      "value": "Beta"
-    },
-    {
-      "key": "settings.network.euro.derivativeCutoff",
-      "value": "Derivative Cutoff"
     },
     {
       "key": "settings.network.connection",
@@ -8001,6 +7986,14 @@
     {
       "key": "settings.admin.title.lockSharedImages.tooltip",
       "value": "Stop non-admin players from sharing new image pickups, and from receiving images shared while this is on. Admins are unaffected."
+    },
+    {
+      "key": "settings.admin.title.remoteEndEffectorIK",
+      "value": "Remote End-Effector IK"
+    },
+    {
+      "key": "settings.admin.title.remoteEndEffectorIK.tooltip",
+      "value": "Two-bone-IK remote avatars' tracked hands and feet onto their sent world targets so they stop sliding. On by default; turn off to fall back to pure-FK playback for everyone."
     },
     {
       "key": "settings.admin.minAvatarHeight",

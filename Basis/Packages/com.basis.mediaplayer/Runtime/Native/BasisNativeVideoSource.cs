@@ -25,6 +25,16 @@ public enum BasisVideoBufferMode
     Dynamic = 1,  // auto-tune: grow on underrun risk, shrink when over-buffered
 }
 
+// Video codecs the native engine can be asked about. Values match the native
+// probe ABI (basis_media_probe_video_codec).
+public enum BasisVideoCodec
+{
+    H264 = 1,
+    H265 = 2,
+    VP9 = 3,
+    AV1 = 4,
+}
+
 // Zero-copy live media source backed by the OS-codec engine in basis_media_native.
 //
 // Unlike the CPU IBasisFrameSource path (which decodes into managed byte[] frames
@@ -151,6 +161,16 @@ public sealed class BasisNativeVideoSource : IBasisPcmSource, IDisposable
 
     public bool SeekBackUs(long backUs) => BasisNativeMedia.SeekBackUs(handle, backUs);
 
+    // True when this platform decodes the codec, verified as far as the platform
+    // allows (Windows: decoder MFT + GPU decode profile; Android: decoder
+    // presence — hardware-universal for these codecs on Quest). Engine-less —
+    // callable before any source exists, from any thread (resolvers run on
+    // worker threads); the verdict is cached natively for the process lifetime.
+    // Use it to gate format selection so streams are only offered where they
+    // will actually play.
+    public static bool IsVideoCodecSupported(BasisVideoCodec codec)
+        => BasisNativeMedia.ProbeVideoCodec((int)codec);
+
     // Diagnostics: heartbeat so we can see whether frames keep flowing.
     private int pumpCount;
     private BasisMediaEngineState lastLoggedState = (BasisMediaEngineState)(-1);
@@ -260,7 +280,12 @@ public sealed class BasisNativeVideoSource : IBasisPcmSource, IDisposable
     {
         if (handle == IntPtr.Zero || disposed) return;
 
-        PollTrackStateOnce();
+        var engineState = BasisNativeMedia.GetState(handle);
+        bool trackStateCanChange =
+            engineState == BasisNativeMedia.State.Connecting ||
+            engineState == BasisNativeMedia.State.Buffering ||
+            engineState == BasisNativeMedia.State.Playing;
+        if (trackStateCanChange && (pumpCount % 30) == 0) PollTrackStateOnce();
 
         // On the Vulkan path: as soon as the engine has detected the video size,
         // allocate a RenderTexture and hand its native pointer to the plugin.
@@ -312,7 +337,7 @@ public sealed class BasisNativeVideoSource : IBasisPcmSource, IDisposable
             }
         }
 
-        switch (BasisNativeMedia.GetState(handle))
+        switch (engineState)
         {
             case BasisNativeMedia.State.Error when !errorRaised:
                 errorRaised = true;
@@ -345,7 +370,7 @@ public sealed class BasisNativeVideoSource : IBasisPcmSource, IDisposable
         // ended (state=Ended), or the texture froze (frames stuck but no error).
         pumpCount++;
         if (!verboseLogging) return;
-        BasisMediaEngineState hb = State;
+        BasisMediaEngineState hb = (BasisMediaEngineState)(int)engineState;
         if (hb != lastLoggedState || (pumpCount % 120) == 0)
         {
             lastLoggedState = hb;

@@ -510,7 +510,7 @@ namespace Basis.Tests.IK
 
         static BasisArmSolveResult SolveArmCore(Vector3 shoulder, Vector3 elbow, Vector3 hand, Vector3 target, Vector3 hint)
         {
-            BasisArmSolveInput input;
+            BasisArmSolveInput input = default;
             input.Shoulder = shoulder;
             input.Elbow = elbow;
             input.Hand = hand;
@@ -549,7 +549,7 @@ namespace Basis.Tests.IK
 
         static BasisLegSolveResult SolveLegCore(Vector3 hip, Vector3 knee, Vector3 ankle, Vector3 target, Vector3 hint, float hintWeight)
         {
-            BasisLegSolveInput input;
+            BasisLegSolveInput input = default;
             input.Root = hip;
             input.Mid = knee;
             input.Tip = ankle;

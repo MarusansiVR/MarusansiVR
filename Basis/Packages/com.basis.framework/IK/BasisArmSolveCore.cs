@@ -15,16 +15,22 @@ namespace UnityEngine.Animations.Rigging
         public Vector3 PlayerUp;
         public float HintMaxStepDeg;   // max elbow-swivel change this solve; float.MaxValue = unclamped (offline)
         public bool HintIsTracker;     // hint is a REAL elbow tracker (trust it further before the down-stabilizer overrides); false = lookup-derived
+        public Quaternion TipRotation; // ANIMATED hand world rotation (pre-IK), like RootRotation/MidRotation. Zero (the default) disables wrist-roll relief.
+        public Quaternion HintRotation; // the tracker's measured lower-arm WORLD rotation (calibrated to the bone). Zero (the default) disables the tracker forearm roll.
     }
 
     public struct BasisArmSolveResult
     {
         // Apply through the AnimationStream in this order; identity steps are exact no-ops:
         //   mid.SetRotation(MidDelta * mid.GetRotation), root.SetRotation(RootDelta * ...),
-        //   root.SetRotation(HintDelta * ...), tip.SetRotation(TipRotation).
+        //   root.SetRotation(HintDelta * ...), mid.SetRotation(MidPostRoll * mid.GetRotation),
+        //   tip.SetRotation(TipRotation).
         public Quaternion MidDelta;
         public Quaternion RootDelta;
         public Quaternion HintDelta;
+        public Quaternion MidPostRoll;   // WORLD premultiply on the forearm, applied AFTER the root deltas
+                                         // have propagated: a pure roll about its own long axis, so it can
+                                         // move no joint. Always a valid quaternion (identity when unused).
         public Quaternion TipRotation;
         public bool HintApplied;
 
@@ -43,6 +49,9 @@ namespace UnityEngine.Animations.Rigging
         public float ArmProjMag;     // |elbow projected onto swing plane|; small = elbow near-straight (pole ill-defined)
         public byte AxisSource;     // 0 bend-plane, 1 hint, 2 shoulder->target, 3 playerUp
         public float HandError;
+        public float WristTwistDeg;   // signed hand-target roll vs the carried animated wrist, about the forearm axis
+        public float WristReliefDeg;  // signed swivel actually spent relieving it (0 = relief not engaged)
+        public float ForearmRollDeg;  // signed tracker-path forearm roll applied via MidPostRoll (0 = not engaged)
     }
 
     // Stream-free geometry shared by BasisFullIKConstraintJob.SolveTwoBoneIKArms and the
@@ -54,19 +63,94 @@ namespace UnityEngine.Animations.Rigging
 
         // Elbow-lever fade window, as a fraction of the arm's reach that the elbow stands off the shoulder->hand
         // axis. Start = sqrt(0.001), the exact threshold the old boolean gate cliffed at, so the fade only
-        // replaces the step and never grants the hint authority the solver was previously withholding.
-        const float k_HintBendFadeStart = 0.0316228f;
-        const float k_HintBendFadeFull = 0.12f;
 
         // Anatomical elbow flexion range, as the angle at the elbow between the upper arm and the forearm.
         // 180 deg = arm straight; small = forearm folded toward the upper arm. A human elbow cannot
         // hyperextend past straight, nor fold the forearm fully into the upper arm (~25-30 deg is the limit).
         public const float MinElbowAngleDeg = 23f;
-        public const float MaxElbowAngleDeg = 180f;
+
+        // =============================================================================================
+        // ⭐ WHY THIS IS 170 AND NOT 180, AND WHY IT IS THE MOST IMPORTANT CONSTANT IN THIS FILE.
+        //
+        // AT 180 DEGREES THE ELBOW HAS NO LEVER ARM. Its distance from the shoulder->hand axis is
+        //
+        //     rho = sqrt(upper^2 - (d/2)^2),   d = 2*L*sin(theta/2)
+        //
+        // and at theta = 180 that is EXACTLY ZERO. The elbow lies ON the axis. A pole can then no longer
+        // POSITION it -- every direction on its circle is the same point -- so everything the hint, the
+        // swivel, the anatomy guard and the elbow protect ask for is paid out as ROLL of the upper arm
+        // and forearm about their own long axis. A dead-straight arm is a FREE-SPINNING STICK, and that
+        // is what "the elbows are messing up" looks like.
+        //
+        // AND THE ARM LIVES THERE. A relaxed human arm hangs at ~170-175 deg, which is already 99.6% of
+        // full reach. Any target at or past the avatar's reach is clamped by TriangleAngle to a flat 180.
+        //
+        // ⚠️ AND YOU CANNOT CALIBRATE YOUR WAY OUT OF IT. Reach is STATIONARY in the elbow angle near
+        // straight (dr/dtheta -> 0), so the mapping from a length error to an angle error EXPLODES:
+        //
+        //         1 mm of arm-length error  ->  the elbow is already 6.6 deg away from where it should be
+        //         2 mm                      ->  9.4 deg
+        //         0 mm (a PERFECT calibration) -> the target sits exactly AT reach, theta = 180, rho = 0
+        //
+        // A person T-poses with ~10 deg of residual elbow flexion, so a straight-line span under-measures
+        // their true arm by ~2.3 mm on its own. The singularity sits exactly where the user wants to
+        // reach, so no calibration -- however good -- keeps the arm off it.
+        //
+        // ⭐ BUT THE SAME STATIONARITY MAKES THE FIX ALMOST FREE, IN REVERSE:
+        //
+        //         180 -> 170 deg  costs  2.3 MILLIMETRES of reach
+        //                         buys   2.61 CENTIMETRES of guaranteed lever arm      (a 12x trade)
+        //
+        // rho can now never be zero, so the pole always has something to push on, and the roll
+        // singularities this codebase has chased through three separate files become UNREACHABLE:
+        // they all live below rho ~ 1.3 cm (extension >= 0.999), and 170 deg floors rho at 2.61 cm.
+        //
+        // It is also the more ANATOMICAL number. A human elbow does not lock out at 180 under load, and
+        // an avatar whose arm snaps dead straight reads as robotic. 10 deg of flex is what a real arm
+        // does at full stretch.
+        // =============================================================================================
+        public const float MaxElbowAngleDeg = 170f;
+
+        // Hand roll the forearm+wrist render entirely on their own. Anatomical pronation/supination is
+        // ~80 deg each way from the thumbs-up neutral, so palm-flat either way sits right at the edge and
+        // any roll past it belongs to the upper arm.
+        public const float WristRollComfortDeg = 80f;
+
+        // Where humeral recruitment BEGINS. Zero relief below this; a quadratic ramp from here reaches
+        // slope 1 exactly at the comfort band, so the handover is C1 and the elbow cannot buzz on wrist
+        // jitter. A flat in-band share was tried first and the corpus refuted it: 0.2x of the wrist's roll
+        // fed the elbow high-frequency motion the human never made (09_01 buzzed 1.52%L above 8 Hz, gate
+        // 0.5), and the humans' own elbows demonstrably do not follow in-band roll at a constant gain. They
+        // recruit NEAR THE LIMIT -- which is what this ramp is.
+        public const float WristRollRampStartDeg = 55f;
+
+        // Hard bound on the relief swivel, so a pathological target (avatar/controller mismatch) is a bounded
+        // wrong answer instead of an unbounded one. The anatomy guard still owns the outcome.
+        public const float WristRollMaxReliefDeg = 70f;
+
+        // Tracker-path forearm roll: how much say the HAND's roll demand gets against the tracker's own
+        // measured roll. The tracker is strapped to the forearm, so its roll IS pronation, measured; the
+        // hand is where the demand actually ends. Half way keeps a slipped strap and a mis-gripped
+        // controller from each owning the forearm outright.
+        public const float TrackerRollHandBlend = 0.5f;
+
+        // Bound on the applied forearm roll vs the animated pose. Full pronation from a mid-range animated
+        // wrist is ~90-100 deg; past 120 the signal is a slipped strap or a calibration wreck, and a bounded
+        // wrong forearm beats an unbounded one.
+        public const float TrackerForearmRollMaxDeg = 120f;
+
+        // The measured twist is a principal angle, so +180 and -180 are the SAME hand pose with opposite
+        // relief signs. Fade the relief out approaching the seam so both sides meet at zero -- the exact
+        // wrap pop BasisElbowFlareCore documents. Real wrists cannot reach here; only mismatch can.
+        const float k_WristWrapFadeStartDeg = 155f;
+        const float k_WristWrapFadeEndDeg = 178f;
 
         public static void Solve(in BasisArmSolveInput i, out BasisArmSolveResult r)
         {
             r = default;
+            // default(Quaternion) is the ZERO quaternion, and the runtime multiplies MidPostRoll into the
+            // forearm unconditionally -- it must be a rotation on every path out of this method.
+            r.MidPostRoll = Quaternion.identity;
 
             Vector3 aPosition = i.Shoulder;
             Vector3 bPosition = i.Elbow;
@@ -183,45 +267,87 @@ namespace UnityEngine.Animations.Rigging
                     Vector3 ah = i.HintPosition - aPosition;
                     Vector3 abProj = ab - acNorm * Vector3.Dot(ab, acNorm);
                     Vector3 ahProj = ah - acNorm * Vector3.Dot(ah, acNorm);
+                    Vector3 elbowDir = Vector3.Cross(acNorm, rootDelta * axis);
+                    elbowDir -= acNorm * Vector3.Dot(elbowDir, acNorm);
                     hintProjMag = ahProj.magnitude;
                     armProjMag = abProj.magnitude;
 
-                    // Fade only when the pole genuinely collapses onto the shoulder->hand axis,
-                    // keyed on the projection magnitude itself, not raw extension (which discarded
-                    // tracker follow on 21% of the workspace).
-                    float projNorm = (totalLen > k_Epsilon) ? ahProj.magnitude / totalLen : 0f;
-                    // A real elbow tracker sits a physical stand-off (limb radius + strap) OFF the bone, so even
-                    // a short swing-plane projection is genuine out-direction signal, not noise. Re-condition it
-                    // (floor the effective projection) so the elbow FOLLOWS the tracker instead of fading toward
-                    // the rest bend -- the "tracker looks unnatural for some mounts/body sizes" fix. Keyed only
-                    // on ahProj (shoulder/hand/hint positions), so unlike a tracker-LOCAL offset it does NOT
-                    // swing with forearm pronation. Below a small floor the tracker is essentially on the bone
-                    // line (direction is noise) so it still fades. Lookup (no-tracker) path is untouched.
-                    // The floor blends in over [0.05, 0.10] rather than gating at 0.05: a hard gate is a
-                    // one-frame 0<->0.30 cliff in tracker influence (nothing rate-limits the live tracker
-                    // path), so a tracker orbiting the bone line made the elbow snap between follow/ignore.
-                    if (i.HintIsTracker)
-                    {
-                        float floorBlend = Mathf.Clamp01((projNorm - 0.05f) / 0.05f);
-                        projNorm = Mathf.Lerp(projNorm, Mathf.Max(projNorm, 0.30f), floorBlend);
-                    }
-                    hintFade = Mathf.Clamp01((projNorm - 0.06f) / 0.12f);
-
-                    // The ramp above fades ahProj -- the HINT's stand-off from the arm axis. A strapped-on elbow
-                    // tracker keeps that well clear of zero (that is the whole point of the HintIsTracker floor
-                    // right above), so for a real tracker it never actually reaches zero. The quantity that DOES
-                    // collapse is abProj: the ELBOW's own lever arm, which sweeps continuously to zero as the arm
-                    // straightens -- and it was gated with a boolean cliff. Full hint one frame, none the next:
-                    // the elbow teleported around the bend circle at 295x the hand's own travel in a single step,
-                    // on the way out and again on the way back. The floor made it worse, holding hintFade pinned
-                    // at 1.0 right up to the instant the cliff tripped.
+                    // ==========================================================================================
+                    // ⭐ THE POLE IS COMMANDED. IT IS OBEYED. THERE IS NOTHING HERE TO FADE.
                     //
-                    // So ramp abProj as well. The window OPENS at the old cliff, so nothing the solver already
-                    // ignored starts counting; the step just stops being a step. Same fix as BasisLegSolveCore.
-                    float bendNorm = (totalLen > k_Epsilon) ? abProj.magnitude / totalLen : 0f;
-                    hintFade *= Mathf.Clamp01((bendNorm - k_HintBendFadeStart) / (k_HintBendFadeFull - k_HintBendFadeStart));
+                    // This block used to hold TWO fades, and between them they were the reason a real elbow
+                    // tracker inverted:
+                    //
+                    //   projNorm  faded on |ahProj| -- how far the POLE stands off the shoulder->hand axis.
+                    //   bendNorm  faded on |abProj| -- how far the CURRENT ELBOW stands off that same axis.
+                    //
+                    // BOTH of those collapse to zero as the arm STRAIGHTENS, and a VR user holds their arms
+                    // mostly straight: 57% of the corpus sits above 95% extension. Measured on a 0.6 m arm with
+                    // a real tracker, the authority the solver granted it was
+                    //
+                    //      94% extension -> 1.00     98.5% -> 0.62     99.5% -> 0.21     99.9% -> 0.00
+                    //
+                    // At partial authority the elbow does not land on the tracker and it does not land on the
+                    // animation -- it lands BETWEEN them, at a point that depends on the noisy, collapsing
+                    // abProj. Cross the threshold and it snaps from one to the other. THAT is "the elbow
+                    // inverts with a real tracker attached", and "it is not very human movement": the elbow was
+                    // being blended toward an idle animation the user is not performing.
+                    //
+                    // THE FADES WERE GUARDING THE WRONG QUANTITY. What goes to noise as the limb straightens is
+                    // abProj -- the MEASURED direction of the current elbow, whose lever arm is vanishing. The
+                    // POLE does not: it is COMMANDED, by a tracker or by the swivel model, and it stays
+                    // perfectly well-defined at every extension. And because this swivel rotates the elbow ONTO
+                    // the pole, THE ELBOW'S FINAL DIRECTION DOES NOT DEPEND ON WHERE IT STARTED.
+                    //
+                    // BasisLegSolveCore worked this out and deleted its copy long ago, and its comment says so
+                    // in as many words -- "the POLE is commanded, BY A TRACKER OR BY BendNormal". The leg has
+                    // shipped without these fades ever since. The arm's survived, and it is what has been
+                    // breaking the elbow.
+                    //
+                    // What the deletion left behind was the SECOND half of the same defect, and it is why the
+                    // angle below is measured from elbowDir and not from abProj. Deleting the fade correctly
+                    // stopped abProj's collapse from stealing the pole's AUTHORITY -- but the swivel ANGLE was
+                    // still being read off abProj's DIRECTION, and that direction is gone at full extension.
+                    // The resulting rotation is about acNorm, which at full extension IS the upper arm's own
+                    // long axis, so a noisy angle is not a harmless "wrong twist for one frame" -- it is the arm
+                    // ROLLING, at full magnitude, on a limb whose elbow has no lever arm left to show it.
+                    // Measured on a 0.6 m arm: a 1 mm nudge of the hand target rolled the upper arm and the
+                    // forearm 180 deg, with the hand still on target. The median roll at 99.95% extension was
+                    // 20 deg. A VR user reaching or pointing lives there -- 57% of the corpus is past 95%.
+                    //
+                    // elbowDir is that same direction RECONSTRUCTED from the plane the bend just used, via the
+                    // identity Cross(ac, Cross(ab, bc)) == |ac|^2 * abProj. The bend axis is perpendicular to ac
+                    // by construction, so the cross product is a UNIT vector at every extension: identical to
+                    // abProj wherever abProj exists, and still there when it does not. See BasisLegSolveCore,
+                    // which carries the same fix and the same identity.
+                    //
+                    // And note WHAT the surviving epsilon below guards: ahProj, the POLE. It was never a guard on
+                    // the ELBOW, which is why the elbow's collapse ran unnoticed for so long.
+                    // ==========================================================================================
+                    hintFade = 1f;
 
-                    if (hintFade > 0f && ahProj.sqrMagnitude > (totalLen * totalLen * 0.001f))
+                    // ==========================================================================================
+                    // ⚠ A NUMERICAL EPSILON, NOT A BEHAVIOURAL GATE. This test used to read
+                    //
+                    //      ahProj.sqrMagnitude > totalLen * totalLen * 0.001f
+                    //
+                    // which on a 0.6 m arm is |ahProj| > 1.9 CENTIMETRES -- and it is a BOOLEAN. Below it the
+                    // hint was not faded, it was DROPPED, in a single frame, leaving the elbow wherever the base
+                    // animation happened to have left it. And |ahProj| is the pole's stand-off from the
+                    // shoulder->hand axis, which COLLAPSES as the arm straightens -- so an ordinary extended
+                    // reach walked straight through the cliff. Measured by BasisArmTrackerHintAuthorityTests:
+                    // the elbow travelled 2582x the hand's own distance in one step as it crossed.
+                    //
+                    // Geometry alone gets you to about 12x near full extension. Hundreds is not geometry -- it
+                    // is a pole being switched off between two frames, which is the definition of a pop.
+                    //
+                    // The pole's DIRECTION is perfectly well-defined at 1.9 cm; it is well-defined at 1.9
+                    // millimetres. It only becomes noise at true numerical zero. So the guard belongs where
+                    // BasisLegSolveCore has always had it -- at 1e-8, a genuine singularity check -- and nowhere
+                    // else. (And below it, SignedAngleRad returns 0 anyway, so the elbow simply is not swivelled:
+                    // a straight arm whose circle has collapsed has nowhere to put its elbow regardless.)
+                    // ==========================================================================================
+                    if (ahProj.sqrMagnitude > k_SqrEpsilon && elbowDir.sqrMagnitude > k_SqrEpsilon)
                     {
                         // A near-180 deg bend->hint swivel is direction-ambiguous when applied PARTIALLY: as
                         // the geometry crosses anti-parallel the signed angle flips +179 -> -179, and at half
@@ -231,8 +357,8 @@ namespace UnityEngine.Animations.Rigging
                         float effFade = hintFade;
                         if (effFade < 1f)
                         {
-                            float denom = Mathf.Sqrt(abProj.sqrMagnitude * ahProj.sqrMagnitude);
-                            float cosBA = denom > k_Epsilon ? Mathf.Clamp(Vector3.Dot(abProj, ahProj) / denom, -1f, 1f) : 1f;
+                            float denom = Mathf.Sqrt(elbowDir.sqrMagnitude * ahProj.sqrMagnitude);
+                            float cosBA = denom > k_Epsilon ? Mathf.Clamp(Vector3.Dot(elbowDir, ahProj) / denom, -1f, 1f) : 1f;
                             float flipDeg = Mathf.Acos(cosBA) * Mathf.Rad2Deg;
                             float commit = Mathf.SmoothStep(0f, 1f, Mathf.Clamp01((flipDeg - 90f) / 80f));
                             // Only commit when the hint is already strong. Committing as it merely emerges
@@ -252,7 +378,7 @@ namespace UnityEngine.Animations.Rigging
                         // throws the hand clean off its target. A 12-iteration bisection used to sit right here,
                         // walking the hint back toward identity until the hand came home. Naming the axis
                         // deletes the failure and the search for it together.
-                        swivelUsedRad = SignedAngleRad(abProj, ahProj, acNorm) * effFade;
+                        swivelUsedRad = SignedAngleRad(elbowDir, ahProj, acNorm) * effFade;
                         float swivel = swivelUsedRad;
 
                         // Rate-limit so the elbow eases toward the pole rather than swinging ~180 deg the frame
@@ -284,7 +410,17 @@ namespace UnityEngine.Animations.Rigging
             // it if a backward flip survives, lower it if forward/up reaches drift). Folded into HintDelta so
             // the runtime applies it; the hand stays exactly on target -- only the ill-conditioned swivel DOF
             // is replaced by a stable attractor. Perpendicular hint poles (forward / up reaches) are untouched.
-            if (i.HintWeight)
+            // ⚠ NOT WHEN THE ELBOW IS TRACKED. This stabilizer eases the elbow toward WORLD-DOWN, and it was
+            // written for the old invented lookup pole, which really could point backward along the arm and
+            // flip. A TRACKER is the user's actual elbow. Dragging it toward world-down is the solver
+            // overruling a measurement with a guess -- and because it engages on |ahProj|, which collapses as
+            // the arm straightens, it engaged hardest exactly where the user spends most of their time. It is
+            // half of "the elbow is not doing very human movement": the other half was the fades above.
+            //
+            // The swivel model does not need it either (its pole is perpendicular by construction, so
+            // poleCond == 0.5 and collapse == 0 -- this block has been dead code on that path since the model
+            // landed). So it now guards only what it was built for, and nothing else.
+            if (i.HintWeight && !i.HintIsTracker)
             {
                 float poleCond = totalLen > k_Epsilon ? hintProjMag / totalLen : 1f;
                 // Same physical-stand-off reasoning as the hintFade floor above: a real tracker's short pole is
@@ -333,6 +469,190 @@ namespace UnityEngine.Animations.Rigging
                         cPosition = aPosition + stab * (cPosition - aPosition);
                         midRot = stab * midRot;
                         hintR = stab * hintR; // fold into the hint delta the runtime applies
+                    }
+                }
+            }
+
+            // =============================================================================================
+            // ⭐ WRIST-ROLL RELIEF: THE HUMERUS ANSWERS FOR WHAT THE FOREARM CANNOT.
+            //
+            // The tip is written straight to the target rotation, so every degree of controller roll lands
+            // in the wrist joint; the twist bones can only redistribute it along the forearm MESH. Nothing
+            // upstream reads the hand's roll at all -- the field model is position-only, and a twisted-in-
+            // place hand cannot move a position-only elbow. That is "the upper arm stays rigid when I twist
+            // my hand". A real arm pronates ~80 deg each way and then ROTATES THE HUMERUS, which with the
+            // hand pinned is exactly the swivel DOF: the elbow swings around its circle.
+            //
+            // The roll is measured against the ANIMATED wrist carried onto the solved forearm
+            // (midRot * animMid^-1 * animTip), so whatever swivel the hint has already applied is already
+            // relieved before it is measured.
+            //
+            // ⚠ NOT WHEN THE ELBOW IS TRACKED, and the corpus is why. A tracker is the user's real elbow,
+            // and the real humerus already answered: twist your hand and the tracker MOVES -- the avatar's
+            // compensation arrives through the measurement. Running the relief on top was measured on the
+            // 20-clip corpus in TruthJoint mode: real clips drift their wrist past the band against the
+            // carried neutral routinely, so the relief fired constantly and dragged the elbow 3.6-10.1 cm
+            // (MEAN, per clip) off an elbow it had been HANDED. A measured pole is not to be second-guessed
+            // -- the same law the pole-collapse stabilizer above already obeys.
+            //
+            // THE SIGN IS AN IDENTITY, NOT A CONVENTION: swivelling the whole arm about shoulder->hand by
+            // theta rolls the carried neutral by theta about ~the forearm axis, so the residual twist drops
+            // by theta * dot(forearm, ac) -- relief therefore swivels in the SAME signed direction as the
+            // measured twist, for either hand, with no handedness flag. (Anatomy agrees: pronating past
+            // palm-down flares the elbow up-and-out, supinating past palm-up tucks it in-and-down.) The
+            // hand lies on the swivel axis, so reach preservation is structural, and the anatomy guard
+            // below still has the last word on where the elbow may actually sit.
+            // =============================================================================================
+            float tipRotSqr = i.TipRotation.x * i.TipRotation.x + i.TipRotation.y * i.TipRotation.y
+                            + i.TipRotation.z * i.TipRotation.z + i.TipRotation.w * i.TipRotation.w;
+            if (tipRotSqr > 0.5f && !i.HintIsTracker)
+            {
+                Vector3 fore = cPosition - bPosition;
+                Vector3 acRelief = cPosition - aPosition;
+                if (fore.sqrMagnitude > k_SqrEpsilon && acRelief.sqrMagnitude > k_SqrEpsilon)
+                {
+                    Quaternion neutral = midRot * Quaternion.Inverse(i.MidRotation) * i.TipRotation;
+                    float twistRad = TwistAngleRad(tRotation * Quaternion.Inverse(neutral), fore.normalized);
+                    r.WristTwistDeg = twistRad * Mathf.Rad2Deg;
+
+                    float rollAbs = Mathf.Abs(twistRad);
+                    float rampStart = WristRollRampStartDeg * Mathf.Deg2Rad;
+                    float band = WristRollComfortDeg * Mathf.Deg2Rad;
+
+                    // Zero below the ramp; quadratic easing that reaches slope 1 exactly at the band; the
+                    // excess past the band 1:1. C1 everywhere, so wrist jitter cannot become elbow buzz.
+                    float relief;
+                    if (rollAbs <= rampStart)
+                    {
+                        relief = 0f;
+                    }
+                    else if (rollAbs <= band)
+                    {
+                        float t = rollAbs - rampStart;
+                        relief = t * t / (2f * (band - rampStart));
+                    }
+                    else
+                    {
+                        relief = 0.5f * (band - rampStart) + (rollAbs - band);
+                    }
+
+                    float reliefCap = WristRollMaxReliefDeg * Mathf.Deg2Rad;
+                    if (relief > reliefCap) relief = reliefCap;
+                    relief *= 1f - Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(
+                        (rollAbs * Mathf.Rad2Deg - k_WristWrapFadeStartDeg) / (k_WristWrapFadeEndDeg - k_WristWrapFadeStartDeg)));
+
+                    if (relief > 0f)
+                    {
+                        float reliefSigned = twistRad < 0f ? -relief : relief;
+                        Quaternion reliefR = AngleAxisRad(reliefSigned, acRelief.normalized);
+
+                        rootRot = reliefR * rootRot;
+                        bPosition = aPosition + reliefR * (bPosition - aPosition);
+                        cPosition = aPosition + reliefR * (cPosition - aPosition);
+                        midRot = reliefR * midRot;
+                        hintR = reliefR * hintR;   // fold into the hint delta the runtime applies
+                        r.WristReliefDeg = reliefSigned * Mathf.Rad2Deg;
+                    }
+                }
+            }
+
+            // =============================================================================================
+            // ⭐ THE ANATOMY GUARD, AND IT IS THE LAST THING THAT HAPPENS.
+            //
+            // An elbow cannot point at the sky. Measured on 55,140 frames of real human arm motion: THE ELBOW
+            // NEVER RISES ABOVE THE SHOULDER, NOR ABOVE THE HAND, WHICHEVER IS HIGHER -- worst violation in the
+            // entire corpus, nine millimetres. You cannot lift your elbow over your shoulder while your hand
+            // hangs low; the humerus will not do it. See BasisElbowAnatomyCore.
+            //
+            // The KNEE has had a guard of exactly this status for a long time (BasisLegSolveCore's anterior
+            // half-space: "a knee behind that axis is not unnatural, it is anatomically unrepresentable").
+            // THE ARM HAD NONE. Nothing whatsoever stopped this solver placing the elbow anywhere on its
+            // circle, and "the arms get into rotations that are not possible, the elbows point at the sky" is
+            // what that costs.
+            //
+            // IT GUARDS THE OUTCOME, NOT THE HINT, and that is the whole point of putting it HERE, after
+            // everything else has had its say. A guard on the hint would protect the arm from a bad hint. A
+            // guard on the RESULT protects it from a bad hint, a mis-strapped elbow tracker, the pole-collapse
+            // stabilizer above, and the animated pose the solve started from -- so there is no path by which
+            // the arm can end a frame outside the envelope, because this is the end of the frame.
+            //
+            // It costs no reach, structurally: the correction is a swivel about the shoulder->hand axis, and
+            // the hand LIES on that axis. A rotation about a line cannot move a point on that line.
+            // =============================================================================================
+            float guardSwivel = BasisElbowAnatomyCore.GuardSwivelRad(aPosition, bPosition, cPosition, i.PlayerUp, totalLen);
+            if (guardSwivel != 0f)   // exact 0 inside the envelope: legal poses take the untouched path
+            {
+                Vector3 acGuard = cPosition - aPosition;
+                if (acGuard.sqrMagnitude > k_SqrEpsilon)
+                {
+                    Vector3 acGuardN = acGuard.normalized;
+                    Quaternion guard = AngleAxisRad(guardSwivel, acGuardN);
+
+                    rootRot = guard * rootRot;
+                    bPosition = aPosition + guard * (bPosition - aPosition);
+                    cPosition = aPosition + guard * (cPosition - aPosition);
+                    midRot = guard * midRot;
+                    hintR = guard * hintR;   // fold into the hint delta the runtime applies
+                }
+            }
+
+            // =============================================================================================
+            // TRACKER FOREARM ROLL: THE MEASUREMENT THE POLE THROWS AWAY.
+            //
+            // The wrist-roll relief above stands down for a tracker -- the corpus showed second-guessing a
+            // measured pole costs centimetres -- but standing down entirely put every degree of hand roll
+            // back into the wrist joint, and the wrist PINCHES. The answer was on the arm the whole time:
+            // an elbow tracker is STRAPPED TO THE FOREARM, so its rotation carries real pronation, and the
+            // solver was using only its position. Roll the forearm to the blend of the tracker's measured
+            // roll and the hand's demand, and the wrist keeps only the residual a real wrist would.
+            //
+            // A PURE ROLL CAN MOVE NO JOINT. The rotation axis is the forearm's own long axis through the
+            // elbow: the elbow pivots on it and the hand LIES on it, so the elbow stays exactly on the
+            // tracker's pole -- the corpus gates that killed the relief here structurally cannot see this.
+            // It runs AFTER the anatomy guard because the guard reads positions, which this does not touch,
+            // and the runtime applies MidPostRoll after the root deltas for the same reason: the composition
+            // order here and in the stream must be the same, and a roll about the final axis commutes with
+            // nothing that comes later.
+            // =============================================================================================
+            float hintRotSqr = i.HintRotation.x * i.HintRotation.x + i.HintRotation.y * i.HintRotation.y
+                             + i.HintRotation.z * i.HintRotation.z + i.HintRotation.w * i.HintRotation.w;
+            if (i.HintIsTracker && hintRotSqr > 0.5f)
+            {
+                Vector3 foreRoll = cPosition - bPosition;
+                if (foreRoll.sqrMagnitude > k_SqrEpsilon)
+                {
+                    Vector3 foreRollN = foreRoll.normalized;
+                    float trackerRoll = TwistAngleRad(i.HintRotation * Quaternion.Inverse(midRot), foreRollN);
+
+                    float roll = trackerRoll;
+                    if (tipRotSqr > 0.5f)
+                    {
+                        Quaternion neutral = midRot * Quaternion.Inverse(i.MidRotation) * i.TipRotation;
+                        float handRoll = TwistAngleRad(tRotation * Quaternion.Inverse(neutral), foreRollN);
+                        r.WristTwistDeg = handRoll * Mathf.Rad2Deg;
+
+                        // The two signals are principal angles, so their disagreement wraps; and a wrist
+                        // 155+ deg from the measured forearm is not anatomy, it is garbage in one of the
+                        // two. Fade the hand's say to zero approaching the seam so both sides meet there.
+                        float d = handRoll - trackerRoll;
+                        if (d > Mathf.PI) d -= 2f * Mathf.PI;
+                        else if (d < -Mathf.PI) d += 2f * Mathf.PI;
+                        float fade = 1f - Mathf.SmoothStep(0f, 1f, Mathf.Clamp01(
+                            (Mathf.Abs(d) * Mathf.Rad2Deg - k_WristWrapFadeStartDeg) / (k_WristWrapFadeEndDeg - k_WristWrapFadeStartDeg)));
+                        roll = trackerRoll + TrackerRollHandBlend * d * fade;
+                    }
+
+                    // Bound, then apply -- in the reject-unless-good shape, because Mathf.Clamp waves NaN
+                    // through and a NaN written to a bone persists.
+                    float rollAbs = Mathf.Abs(roll);
+                    float rollCap = TrackerForearmRollMaxDeg * Mathf.Deg2Rad;
+                    if (rollAbs > rollCap) rollAbs = rollCap;
+                    if (rollAbs > 1e-6f)
+                    {
+                        float rollSigned = roll < 0f ? -rollAbs : rollAbs;
+                        r.MidPostRoll = AngleAxisRad(rollSigned, foreRollN);
+                        midRot = r.MidPostRoll * midRot;
+                        r.ForearmRollDeg = rollSigned * Mathf.Rad2Deg;
                     }
                 }
             }
@@ -386,6 +706,22 @@ namespace UnityEngine.Animations.Rigging
             float h = 0.5f * radians;
             float s = Mathf.Sin(h);
             return new Quaternion(axis.x * s, axis.y * s, axis.z * s, Mathf.Cos(h));
+        }
+
+        // Signed rotation of q about `axis` (unit), i.e. the swing-twist decomposition's twist angle,
+        // wrapped to (-180, 180]. Projecting the vector part onto the axis removes the swing; atan2 needs
+        // no normalization because a common positive scale cancels; forcing w >= 0 first picks the principal
+        // branch of the double cover. NaN-safe by shape: `!(x > eps)` rejects NaN.
+        static float TwistAngleRad(Quaternion q, Vector3 axis)
+        {
+            float s = q.x * axis.x + q.y * axis.y + q.z * axis.z;
+            float c = q.w;
+            if (c < 0f) { s = -s; c = -c; }
+            if (!(s * s + c * c > k_SqrEpsilon))
+            {
+                return 0f;
+            }
+            return 2f * Mathf.Atan2(s, c);
         }
 
         static float AngleDeg(Vector3 from, Vector3 to)
