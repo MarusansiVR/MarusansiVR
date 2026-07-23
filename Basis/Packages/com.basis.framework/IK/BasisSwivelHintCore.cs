@@ -1,7 +1,8 @@
 using Unity.Burst;
 using Unity.Mathematics;
 
-namespace UnityEngine.Animations.Rigging
+using UnityEngine;
+namespace Basis.IK
 {
     /// <summary>
     /// The body frame the swivel models are fitted in: a right-handed triad built from BONE POSITIONS.
@@ -70,7 +71,10 @@ namespace UnityEngine.Animations.Rigging
         ///
         /// It is gone because BasisElbowFieldModel has nothing to be unconfident ABOUT: it predicts a
         /// POSITION, so its only degeneracy is geometric (the predicted elbow landing on the arm's own
-        /// axis), it is measurable, and it is FADED inside the model rather than gated outside it.
+        /// axis), it is measurable, and it is measure-zero -- the model falls back to its rest pole ONLY
+        /// on those exact cores. (It used to FADE toward that pole below a 0.10 lever instead, and the
+        /// fade's antipodal lerp was itself a hidden gate: it teleported the elbow 28 cm/frame on big
+        /// cross-body swings. See the field model's header.)
         /// </summary>
 
         /// <summary>
@@ -86,6 +90,36 @@ namespace UnityEngine.Animations.Rigging
         /// </summary>
         static readonly float3 k_ElbowTuckPole = new float3(-1f, -0.35f, 0f);
         public const float ElbowTuckWeight = 0.12f;
+
+        /// <summary>
+        /// ELBOW-DOWN ON A STRAIGHT ARM. The field model predicts the CORPUS-MEAN elbow, and CMU contains
+        /// essentially no straight-arm lateral holds -- a T-pose is a calibration pose, not a motion -- so the
+        /// mean there is dragged backward by the reaching motions that DO trail the elbow. Measured on the
+        /// shipping model: at a lateral straight arm it wants the elbow 52 deg BACK of straight down, where a
+        /// real one hangs down.
+        ///
+        /// That error is nearly free in ELBOW POSITION and very expensive in BONE ROLL. At full extension the
+        /// elbow's lever arm is ~2 cm, so 52 deg of azimuth buys almost no displacement -- it is paid as humeral
+        /// ROLL, which moves no joint (so every position gate in this repo is structurally blind to it) and reads
+        /// as a twisted, pinched deltoid. Measured 52 deg of permanent humeral twist on an elbow-down bind.
+        ///
+        /// Gated on EXTENSION, not on confidence: the model has nothing to be unconfident about (see above), but
+        /// its positional authority genuinely collapses as the arm straightens, and that is exactly where the
+        /// anatomy it failed to learn -- gravity and the carrying angle hang the elbow down -- takes over. Below
+        /// k_ElbowDownReachStart this is the exact identity, so the fitted field is untouched everywhere it was
+        /// actually trained.
+        ///
+        /// Same shape as the tuck: an UN-NORMALISED perpendicular projection, so it self-fades to zero as the
+        /// arm approaches the pole's own direction and cannot introduce a new zero.
+        /// </summary>
+        static readonly float3 k_ElbowDownPole = new float3(0f, -1f, 0f);
+        public const float ElbowDownWeight = 0.85f;
+        public const float ElbowDownReachStart = 0.90f;
+        public const float ElbowDownReachFull = 0.99f;
+
+        // The neural pole is now the FBIKNeuralPole setting (default OFF) -> BasisFullIKConstraintJob.useNeuralPole ->
+        // job.useNeuralPole -> ArmHint/LegHint `useNeural` (tests/harness omit the arg, so they stay on field/poly).
+        // Default off: Unity A/B (BasisMocapMotionQualityTests) put it even-to-slightly-worse on CMU but pop-free.
 
         /// <summary>|(s,c)| at or below which the leg model has no usable opinion and the solve should
         /// fall back to its own anatomical bend pole.</summary>
@@ -179,7 +213,8 @@ namespace UnityEngine.Animations.Rigging
         /// falls back to its own internal pole, which is what it did before any of this existed.
         /// </summary>
         public static bool ArmHint(in BasisSwivelFrame frameNow, Vector3 shoulder, Vector3 handPos,
-                                   float armLen, bool isLeft, out Vector3 hintPos, out float confidence)
+                                   float armLen, bool isLeft, out Vector3 hintPos, out float confidence,
+                                   bool useNeural = false)
         {
             hintPos = default;
             confidence = 0f;
@@ -199,8 +234,28 @@ namespace UnityEngine.Animations.Rigging
                 return false;
             }
 
-            float3 elbowLocal = BasisElbowFieldModel.Elbow(tipLocal);
-            float3 bend = BasisElbowFieldModel.BendDirection(tipLocal, elbowLocal, out confidence);
+            // BasisElbowStereoModel eliminates this field's reach-behind topological core (it carries a
+            // single index-2 zero, parked in the torso, so the whole reachable workspace is zero-free).
+            // BasisElbowFieldModel stays as the A/B baseline and the source of the anatomical Elbow() prior.
+            float3 bend;
+            if (useNeural)
+            {
+                // A/B (opt-in per call): the neural POSITION model, a drop-in for BasisElbowFieldModel.Elbow. It
+                // predicts the elbow's POSITION and flows through the SAME BendDirection projection + tuck +
+                // world map below. POSITION not angle, so it carries NO sign/mirror trap -- the whole reason the
+                // arm is position-based (see this file's header: the angle sign has poisoned this model twice).
+                float3 elbowLocal = BasisArmElbowNeuralFieldModel.Elbow(tipLocal);
+                bend = BasisElbowFieldModel.BendDirection(tipLocal, elbowLocal, out confidence);
+            }
+            else if (BasisElbowFieldModel.UseStereoField)
+            {
+                bend = BasisElbowStereoModel.BendDirection(tipLocal, out confidence);
+            }
+            else
+            {
+                float3 elbowLocal = BasisElbowFieldModel.Elbow(tipLocal);
+                bend = BasisElbowFieldModel.BendDirection(tipLocal, elbowLocal, out confidence);
+            }
 
             if (!IsFinite(bend))
             {
@@ -213,6 +268,17 @@ namespace UnityEngine.Animations.Rigging
             float3 tuckAxis = math.normalizesafe(tipLocal, new float3(0f, -1f, 0f));
             float3 tuckPerp = k_ElbowTuckPole - tuckAxis * math.dot(k_ElbowTuckPole, tuckAxis);
             bend = math.normalizesafe(bend + ElbowTuckWeight * tuckPerp, bend);
+
+            // Elbow-down on a straight arm (see the constants). Projected against the SAME axis, so the sum of
+            // perpendicular vectors stays perpendicular and the world map below keeps its promise.
+            float reachRatio = math.length(tipLocal);
+            float downT = math.saturate((reachRatio - ElbowDownReachStart) / (ElbowDownReachFull - ElbowDownReachStart));
+            float downW = ElbowDownWeight * (downT * downT * (3f - 2f * downT));
+            if (downW > 0f)
+            {
+                float3 downPerp = k_ElbowDownPole - tuckAxis * math.dot(k_ElbowDownPole, tuckAxis);
+                bend = math.normalizesafe(bend + downW * downPerp, bend);
+            }
 
             // Back to world through the SAME mirrored triad the features were built in. It is orthonormal,
             // so it carries perpendicularity across unchanged: `bend` is perpendicular to tipLocal in the
@@ -239,7 +305,8 @@ namespace UnityEngine.Animations.Rigging
         ///     from 70 pops to 65. It relocated the discontinuity, it did not remove it.
         /// </summary>
         public static bool LegHint(in BasisSwivelFrame frameNow, Vector3 hip, Vector3 footPos,
-                                   float legLen, bool isLeft, out Vector3 hintPos, out float confidence)
+                                   float legLen, bool isLeft, out Vector3 hintPos, out float confidence,
+                                   bool useNeural = false)
         {
             hintPos = default;
             confidence = 0f;
@@ -256,7 +323,11 @@ namespace UnityEngine.Animations.Rigging
                 return false;
             }
 
-            float swivel = BasisLegSwivelModel.SwivelRad(tipLocal, out confidence);
+            // NeuralSwivel A/B (opt-in per call): the neural knee is a clean drop-in -- LegHint is already an
+            // ANGLE path, same (sin,cos) convention, same un-mirror + BendDirection below, so only weights change.
+            float swivel = useNeural
+                ? BasisLegSwivelNeuralModel.SwivelRad(tipLocal, out confidence)
+                : BasisLegSwivelModel.SwivelRad(tipLocal, out confidence);
             if (isLeft)
             {
                 swivel = -swivel;

@@ -16,6 +16,7 @@ public class BasisOpenXRHeadInput : BasisInput
 
     public void Initialize(string UniqueID, string UnUniqueID, string subSystems, bool AssignTrackedRole)
     {
+        TrackingHardware = BasisTrackingHardware.InsideOut;
         InitializeTracking(UniqueID, UnUniqueID, subSystems, AssignTrackedRole, BasisBoneTrackedRole.CenterEye);
 
         Position = new InputActionProperty(new InputAction("<XRHMD>/centerEyePosition", InputActionType.Value, "<XRHMD>/centerEyePosition", expectedControlType: "Vector3"));
@@ -48,14 +49,11 @@ public class BasisOpenXRHeadInput : BasisInput
 
     public override void LateDoPollData()
     {
+        PollPose();
     }
     public override void RenderPollData()
     {
-        ComputeUnscaledDeviceCoord(ref UnscaledDeviceCoord, _positionAction.ReadValue<Vector3>());
-        UnscaledDeviceCoord.rotation = _rotationAction.ReadValue<Quaternion>();
-
-        ConvertToScaledDeviceCoord();
-        ControlOnlyAsDevice();
+        PollPose();
         ComputeRaycastDirection(ScaledDeviceCoord.position, ScaledDeviceCoord.rotation, Quaternion.identity);
         UpdateInputEvents();
 
@@ -63,6 +61,14 @@ public class BasisOpenXRHeadInput : BasisInput
         {
             BasisOpenXRInputEye.Simulate();
         }
+    }
+    private void PollPose()
+    {
+        ComputeUnscaledDeviceCoord(ref UnscaledDeviceCoord, _positionAction.ReadValue<Vector3>());
+        UnscaledDeviceCoord.rotation = _rotationAction.ReadValue<Quaternion>();
+
+        ConvertToScaledDeviceCoord();
+        ControlOnlyAsDevice();
     }
     public override void ShowTrackedVisual()
     {

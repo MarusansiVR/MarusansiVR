@@ -46,13 +46,22 @@ typedef struct {
     int pkt_size;   /* 0 until detected; 188, or 192 for m2ts */
 } ts_t;
 
+/* A PES buffer only flushes on the next payload-unit-start for its PID, so a
+ * stream that sets PUSI once and never again would grow this without bound. Cap
+ * it: a single video PES (unbounded PES_packet_length, delimited by the next
+ * PUSI) can legitimately reach a few MiB at high bitrate/4K, well under this. */
+#define TS_MAX_PES (8 * 1024 * 1024)
+
 static int accum_reserve(es_accum_t* e, int extra) {
-    if (e->len + extra <= e->cap) return 1;
-    int ncap = e->cap ? e->cap * 2 : 65536;
-    while (ncap < e->len + extra) ncap *= 2;
+    int64_t need = (int64_t)e->len + extra;
+    if (need <= e->cap) return 1;
+    if (need > TS_MAX_PES) return 0;
+    int64_t ncap = e->cap ? e->cap : 65536;
+    while (ncap < need) ncap *= 2;
+    if (ncap > TS_MAX_PES) ncap = TS_MAX_PES;
     uint8_t* nb = (uint8_t*)realloc(e->buf, (size_t)ncap);
     if (!nb) return 0;
-    e->buf = nb; e->cap = ncap;
+    e->buf = nb; e->cap = (int)ncap;
     return 1;
 }
 
@@ -90,10 +99,17 @@ static void flush_video(ts_t* t) {
     if (!t->video_announced) {
         int w = 0, h = 0;
         if (t->video_codec == BASIS_CODEC_H264) {
-            int pos = 0, no, nl;
+            int pos = 0, no, nl, have_sps = 0;
             while ((pos = basis_annexb_next(au, au_len, pos, &no, &nl)) >= 0) {
-                if (nl > 0 && basis_h264_nal_type(au[no]) == 7) { basis_h264_sps_dimensions(au + no, nl, &w, &h); break; }
+                if (nl > 0 && basis_h264_nal_type(au[no]) == 7) {
+                    basis_h264_sps_dimensions(au + no, nl, &w, &h);
+                    if (w > 0 && h > 0) { have_sps = 1; break; }
+                }
             }
+            /* Mid-GOP join (or an SPS we couldn't read dimensions from): drop this
+             * AU — it can't decode without its IDR anyway — and wait for the next
+             * SPS-bearing keyframe instead of announcing 0x0 and latching. */
+            if (!have_sps) { e->len = 0; e->started = 0; return; }
         }
         t->sink->on_video_format(t->sink->user, t->video_codec, NULL, 0, w, h);
         t->video_announced = 1;
@@ -192,7 +208,7 @@ static void feed_es(ts_t* t, es_accum_t* e, int pusi, const uint8_t* payload, in
         e->started = 1;
     }
     if (!e->started) return;
-    if (!accum_reserve(e, plen)) return;
+    if (!accum_reserve(e, plen)) { e->len = 0; e->started = 0; return; } /* over cap: drop, resync on next PUSI */
     memcpy(e->buf + e->len, payload, (size_t)plen);
     e->len += plen;
 }

@@ -1,4 +1,5 @@
-namespace UnityEngine.Animations.Rigging
+using UnityEngine;
+namespace Basis.IK
 {
     public struct BasisSwingContinuityState
     {
@@ -74,7 +75,7 @@ namespace UnityEngine.Animations.Rigging
             int smoothState = -1;
 
             // Carry the stored swing with the axis change so only the *extra* swing is limited.
-            Vector3 carried = QuaternionExt.FromToRotation(s.LastAxis, axis) * s.LastDir;
+            Vector3 carried = BasisQuaternionExt.FromToRotation(s.LastAxis, axis) * s.LastDir;
             carried -= axis * Vector3.Dot(carried, axis);
             float carriedSqr = carried.sqrMagnitude;
             bool easing = false;

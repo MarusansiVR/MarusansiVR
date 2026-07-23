@@ -1,4 +1,4 @@
-using Basis.Network.Core;
+﻿using Basis.Network.Core;
 using Basis.Network.Server.Generic;
 using Basis.Network.Server.Ownership;
 using BasisNetworkCore;
@@ -449,6 +449,14 @@ namespace BasisServerHandle
         #region Avatar and Voice Handling
         public static void SendAvatarMessageToClients(NetPacketReader Reader, NetPeer Peer)
         {
+            // Leading kind byte multiplexes this channel — see BasisNetworkCommons.AvatarChangeKind*.
+            byte kind = Reader.GetByte();
+            if (kind == BasisNetworkCommons.AvatarChangeKindBodyFit)
+            {
+                SendBodyFitMessageToClients(Reader, Peer);
+                return;
+            }
+
             ClientAvatarChangeMessage ClientAvatarChangeMessage = new ClientAvatarChangeMessage();
             ClientAvatarChangeMessage.Deserialize(Reader);
             Reader.Recycle();
@@ -480,7 +488,39 @@ namespace BasisServerHandle
             };
             BasisSavedState.AddLastData(Peer, ClientAvatarChangeMessage);
             NetDataWriter Writer = NetworkServer.RentWriter();
+            Writer.Put(BasisNetworkCommons.AvatarChangeKindFull);
             serverAvatarChangeMessage.Serialize(Writer);
+
+            NetworkServer.BroadcastMessageToClients(Writer, BasisNetworkCommons.AvatarChangeMessageChannel, Peer, NetworkServer.PeerSnapshot, DeliveryMethod.ReliableOrdered);
+            NetworkServer.ReturnWriter(Writer);
+        }
+
+        /// <summary>
+        /// Handles a body-fit-only update: merge it into this peer's saved avatar record (so a late
+        /// joiner receives the current proportions with the avatar, not the authored ones) and relay it
+        /// to everyone else. Deliberately not gated by the global avatar lock — nothing is being loaded,
+        /// this only resizes segments of an avatar the peer is already wearing.
+        /// </summary>
+        private static void SendBodyFitMessageToClients(NetPacketReader Reader, NetPeer Peer)
+        {
+            ClientBodyFitMessage bodyFit = new ClientBodyFitMessage();
+            bodyFit.Deserialize(Reader);
+            Reader.Recycle();
+
+            BasisSavedState.UpdateBodyFit(Peer, bodyFit);
+
+            ServerBodyFitMessage serverBodyFitMessage = new ServerBodyFitMessage
+            {
+                bodyFit = bodyFit,
+                uShortPlayerId = new PlayerIdMessage
+                {
+                    playerID = (ushort)Peer.Id
+                }
+            };
+
+            NetDataWriter Writer = NetworkServer.RentWriter();
+            Writer.Put(BasisNetworkCommons.AvatarChangeKindBodyFit);
+            serverBodyFitMessage.Serialize(Writer);
 
             NetworkServer.BroadcastMessageToClients(Writer, BasisNetworkCommons.AvatarChangeMessageChannel, Peer, NetworkServer.PeerSnapshot, DeliveryMethod.ReliableOrdered);
             NetworkServer.ReturnWriter(Writer);
@@ -753,7 +793,7 @@ namespace BasisServerHandle
         {
             ServerReadyMessage serverReadyMessage = LoadInitialState(authClient, readyMessage);
             NotifyExistingClients(serverReadyMessage, authClient);
-            SendClientListToNewClient(authClient);
+            SendClientListToNewClient(authClient, readyMessage.localAvatarSyncMessage);
         }
 
         public static ServerReadyMessage LoadInitialState(NetPeer authClient, ReadyMessage readyMessage)
@@ -812,39 +852,95 @@ namespace BasisServerHandle
         /// send everyone to the new client
         /// </summary>
         /// <param name="authClient"></param>
-        public static void SendClientListToNewClient(NetPeer authClient)
+        /// <summary>
+        /// Tells a joining client about every player already present, batched into compressed runs
+        /// rather than one packet per player. See ServerReadyBatchMessage for why the compression sits
+        /// at the batch level and not inside each avatar record.
+        /// </summary>
+        public static void SendClientListToNewClient(NetPeer authClient, LocalAvatarSyncMessage joinerPose)
         {
             try
             {
+                // The joiner's own position, taken from the pose it just sent. Used to pick each
+                // player's quality tier; a zero here simply means everyone is measured from the origin,
+                // which is the same answer the reduction system would reach a tick later.
+                Basis.Scripts.Networking.Compression.Vector3 viewerPosition = default;
+                // Only High carries the position as 3 float32; the lower tiers use int24 millimetres,
+                // which would decode as garbage here and produce nonsense distances. Clients send High,
+                // so anything else means fall back to the origin (and therefore to High for everyone).
+                if (joinerPose.array != null
+                    && joinerPose.DataQualityLevel == (byte)Basis.Network.Core.Compression.BasisAvatarBitPacking.BitQuality.High
+                    && joinerPose.array.Length >= Basis.Network.Core.Compression.BasisAvatarBitPacking.WritePosition)
+                {
+                    byte[] poseBytes = joinerPose.array;
+                    viewerPosition = Basis.Network.Core.Compression.BasisNetworkCompressionExtensions.ReadPosition(ref poseBytes);
+                }
+
                 NetPeer[] peers = NetworkServer.PeerSnapshot;
-                NetDataWriter writer = NetworkServer.RentWriter();
+                NetDataWriter batchBuffer = NetworkServer.RentWriter();
+                NetDataWriter sendWriter = NetworkServer.RentWriter();
+                ushort batched = 0;
+
                 foreach (var peer in peers)
                 {
                     if (peer == authClient)
                     {
                         continue;
                     }
-                    writer.Reset();
-                    if (CreateServerReadyMessageForPeer(peer, out ServerReadyMessage Message))
+                    if (!CreateServerReadyMessageForPeer(peer, viewerPosition, out ServerReadyMessage Message))
                     {
-                        Message.Serialize(writer);
-                        //  BNL.Log($"Writing Data with size {writer.Length}");
-                        NetworkServer.TrySend(authClient, writer, BasisNetworkCommons.CreateRemotePlayersForNewPeerChannel, DeliveryMethod.ReliableOrdered);
+                        continue;
+                    }
+
+                    Message.Serialize(batchBuffer);
+                    batched++;
+
+                    if (batchBuffer.Length >= ServerReadyBatchMessage.MaxPayloadBytes)
+                    {
+                        FlushReadyBatch(authClient, batchBuffer, sendWriter, ref batched);
                     }
                 }
-                NetworkServer.ReturnWriter(writer);
+
+                FlushReadyBatch(authClient, batchBuffer, sendWriter, ref batched);
+
+                NetworkServer.ReturnWriter(sendWriter);
+                NetworkServer.ReturnWriter(batchBuffer);
             }
             catch (Exception ex)
             {
                 BNL.LogError($"Failed to send client list: {ex.Message}\n{ex.StackTrace}");
             }
         }
-        private static bool CreateServerReadyMessageForPeer(NetPeer peer, out ServerReadyMessage ServerReadyMessage)
+
+        private static void FlushReadyBatch(NetPeer authClient, NetDataWriter batchBuffer, NetDataWriter sendWriter, ref ushort batched)
+        {
+            if (batched == 0)
+            {
+                return;
+            }
+
+            ServerReadyBatchMessage batch = new ServerReadyBatchMessage
+            {
+                Count = batched,
+                Payload = batchBuffer.CopyData(),
+            };
+
+            sendWriter.Reset();
+            batch.Serialize(sendWriter);
+            NetworkServer.TrySend(authClient, sendWriter, BasisNetworkCommons.CreateRemotePlayersForNewPeerChannel, DeliveryMethod.ReliableOrdered);
+
+            batchBuffer.Reset();
+            batched = 0;
+        }
+        /// <param name="viewerPosition">Where the joining player is. Selects the quality tier for
+        /// <paramref name="peer"/>, exactly as the steady-state send loop would.</param>
+        private static bool CreateServerReadyMessageForPeer(NetPeer peer, Basis.Scripts.Networking.Compression.Vector3 viewerPosition, out ServerReadyMessage ServerReadyMessage)
         {
             try
             {
                 ClientAvatarChangeMessage changeState;
-                bool haveAvatar = BasisSavedState.GetLastAvatarChangeState(peer, out changeState) && changeState.byteArray != null;
+                bool haveRecord = BasisSavedState.GetLastAvatarChangeState(peer, out changeState);
+                bool haveAvatar = haveRecord && changeState.byteArray != null;
                 if (!haveAvatar)
                 {
                     BNL.Log($"No avatar state yet for peer {peer.Id}; sending placeholder spawn so the remote player is created on the joining client.");
@@ -852,15 +948,24 @@ namespace BasisServerHandle
                     {
                         loadMode = 0,
                         byteArray = null,
-                        LocalAvatarIndex = 0
+                        LocalAvatarIndex = 0,
+                        // Carry the fit through even with no avatar yet: a body-fit update can land
+                        // before the avatar change (recalibration mid-load), and dropping it here would
+                        // leave this joiner rendering authored proportions until the next recalibration.
+                        ArmScale = haveRecord ? changeState.ArmScale : 1f,
+                        LegScale = haveRecord ? changeState.LegScale : 1f,
+                        TorsoScale = haveRecord ? changeState.TorsoScale : 1f,
                     };
                 }
 
                 int id = peer.Id;
                 LocalAvatarSyncMessage syncState;
-                if (BasisServerReductionSystemEvents.playerStates.TryGetValue(id, out PlayerState state))
+                // Distance-tiered: a joiner gets the same quality for this player that the reduction
+                // system would pick on its next tick, instead of a full High payload for everyone in
+                // the instance. At crowd scale almost everyone is past the VeryLow threshold.
+                if (BasisServerReductionSystemEvents.TryGetJoinSnapshot(viewerPosition, id, out LocalAvatarSyncMessage tiered))
                 {
-                    syncState = state.SyncMessage.avatarSerialization;
+                    syncState = tiered;
                 }
                 else
                 {

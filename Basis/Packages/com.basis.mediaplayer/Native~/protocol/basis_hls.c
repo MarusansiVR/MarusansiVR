@@ -9,6 +9,8 @@
 
 #include "basis_hls.h"
 #include "../basis_media_internal.h"  /* BASIS_READ_REPOSITION */
+#include "basis_io.h"                 /* basis_io_host_is_blocked (SSRF guard) */
+#include "basis_url.h"                /* basis_url_parse */
 
 #include <stdlib.h>
 #include <string.h>
@@ -54,7 +56,11 @@ static void hls_mutex_unlock(hls_mutex_t* m)  { pthread_mutex_unlock(m); }
 #define HLS_MAX_PLAYLIST   (1 << 20) /* 1 MiB playlist cap                         */
 #define HLS_MAX_EMPTY_RELOADS 8  /* consecutive no-new-media reloads before giving up */
 #define HLS_LIVE_MARGIN_SEGMENTS 3 /* playout buffer kept behind the live edge for plain (non-LL) HLS */
-#define HLS_RING_CAP (4 * 1024 * 1024) /* read-ahead byte buffer (~5 s of 1080p HD) */
+/* Read-ahead byte buffer (~5 s of 1080p HD). Kept small on purpose: a larger
+ * read-ahead makes the VOD producer reach the end of the playlist further ahead
+ * of playout, which widens the window where a seek is rejected outright (the
+ * producer_done path). One heap allocation per HLS stream. */
+#define HLS_RING_CAP (4 * 1024 * 1024)
 
 /* (msn, part) media position. part == -1 means a whole segment. */
 typedef struct {
@@ -235,11 +241,36 @@ static void resolve_url(const char* base, const char* ref, char* out, int outsz)
 
 /* ---- playlist fetch ------------------------------------------------------ */
 
+/* SSRF gate for every URL a playlist steers us to. The managed layer validates
+ * only the entry URL; variant/segment/map URIs come from the (attacker-controlled)
+ * playlist body and are followed here, so re-check each one: it must stay on
+ * http(s) and its host must not resolve to a non-global-unicast address. The
+ * platform HTTP stacks (WinHTTP / JNI) don't apply this guard themselves.
+ *
+ * This is a pre-check: it blocks literal internal addresses and hosts that resolve
+ * private. It does NOT close two provider-side bypasses — active DNS rebinding (the
+ * platform stack re-resolves the name when it connects) and an allowed URL that
+ * redirects to an internal host (WinHTTP/JNI follow redirects). Fully closing those
+ * needs connect-by-pinned-IP plus per-redirect re-validation and connected-peer
+ * verification at the HTTP-provider boundary — tracked as a follow-up. */
+/* out_blocked (nullable) distinguishes a deterministic policy rejection (bad
+ * scheme/host — retrying can never succeed) from a transient provider open
+ * failure, so a caller can terminate on the former instead of busy-looping. */
+static void* hls_guarded_open(basis_hls_t* h, const char* url, int* out_blocked) {
+    if (out_blocked) *out_blocked = 1;   /* set for the policy-reject early returns */
+    basis_url_t u;
+    if (basis_url_parse(url, &u) != 0) return NULL;
+    if (strcmp(u.scheme, "http") != 0 && strcmp(u.scheme, "https") != 0) return NULL;
+    if (basis_io_host_is_blocked(u.host)) return NULL;
+    if (out_blocked) *out_blocked = 0;   /* passed policy; any NULL below is transient */
+    return h->http.open(url);
+}
+
 /* GET `url` fully into a NUL-terminated buffer (caller frees). Returns length,
  * or <0 on error / stop. */
-static int fetch_text(basis_hls_t* h, const char* url, char** out) {
+static int fetch_text(basis_hls_t* h, const char* url, char** out, int* out_blocked) {
     *out = NULL;
-    void* ctx = h->http.open(url);
+    void* ctx = hls_guarded_open(h, url, out_blocked);
     if (!ctx) return -1;
 
     int cap = 16384, len = 0;
@@ -475,8 +506,9 @@ static int reload_and_enqueue(basis_hls_t* h) {
     }
 
     char* text = NULL;
-    int n = fetch_text(h, url, &text);
-    if (n < 0) { free(text); return -1; }
+    int blocked = 0;
+    int n = fetch_text(h, url, &text, &blocked);
+    if (n < 0) { free(text); return blocked ? -2 : -1; } /* -2 = policy-blocked (deterministic) */
 
     hls_playlist_t pl;
     parse_media_playlist(h->media_url, text, &pl);
@@ -569,14 +601,27 @@ static void hls_producer(basis_hls_t* h) {
         }
         if (!h->seg_ctx) {
             if (h->is_fmp4 && !h->map_served && h->map_uri[0]) {
-                h->seg_ctx = h->http.open(h->map_uri); /* fMP4 init segment first */
+                int blocked = 0;
+                h->seg_ctx = hls_guarded_open(h, h->map_uri, &blocked); /* fMP4 init segment first */
+                if (!h->seg_ctx) {
+                    /* A policy-blocked map can never load and its fragments are
+                     * useless without it, so stop instead of spinning; a transient
+                     * open failure backs off and retries. */
+                    if (blocked) break;
+                    if (!hls_should_run(h)) break;
+                    hls_sleep_ms(50);
+                    continue;
+                }
                 h->map_served = 1;
-                if (!h->seg_ctx) continue;
             } else {
                 const char* next = queue_pop(h, NULL);
                 if (next) {
-                    h->seg_ctx = h->http.open(next);
-                    if (!h->seg_ctx) continue; /* skip a transient open failure */
+                    int blocked = 0;
+                    h->seg_ctx = hls_guarded_open(h, next, &blocked);
+                    if (!h->seg_ctx) {
+                        if (blocked) break;    /* policy-blocked (SSRF): fail playback deterministically */
+                        continue;              /* transient: skip; the next pop advances */
+                    }
                     h->empty_reloads = 0;
                 } else if (h->endlist_seen) {
                     /* VOD exhausted. Arbitrate against a late seek under the lock:
@@ -592,6 +637,7 @@ static void hls_producer(basis_hls_t* h) {
                 } else {
                     int r = reload_and_enqueue(h);
                     if (r > 0) { h->empty_reloads = 0; }
+                    else if (r == -2) break; /* playlist policy-blocked: retrying can't recover */
                     else if (r < 0) {
                         if (!hls_should_run(h)) break;
                         hls_sleep_ms(50); /* transient fetch error — back off and retry */
@@ -666,14 +712,14 @@ void* basis_hls_open(const char* url, const basis_http_provider_t* http,
 
     /* Fetch the entry playlist; follow one master->media indirection. */
     char* text = NULL;
-    if (fetch_text(h, url, &text) < 0 || !text) { free(text); free(h); return NULL; }
+    if (fetch_text(h, url, &text, NULL) < 0 || !text) { free(text); free(h); return NULL; }
 
     if (playlist_is_master(text)) {
         char media[HLS_MAX_URI];
         if (!master_pick_variant(h, url, text, media, sizeof(media))) { free(text); free(h); return NULL; }
         snprintf(h->media_url, sizeof(h->media_url), "%s", media);
         free(text);
-        if (fetch_text(h, h->media_url, &text) < 0 || !text) { free(text); free(h); return NULL; }
+        if (fetch_text(h, h->media_url, &text, NULL) < 0 || !text) { free(text); free(h); return NULL; }
     } else {
         snprintf(h->media_url, sizeof(h->media_url), "%s", url);
     }
@@ -743,11 +789,13 @@ void* basis_hls_open(const char* url, const basis_http_provider_t* http,
     /* Start the read-ahead producer so segments buffer ahead of playout. */
     h->ring_cap = HLS_RING_CAP;
     h->ring = (uint8_t*)malloc((size_t)h->ring_cap);
-    if (!h->ring) { free(h); return NULL; }
+    if (!h->ring) { free(h->vod_uri); free(h->vod_dur_ms); free(h); return NULL; }
     hls_mutex_init(&h->lock);
     if (!hls_thread_start(h)) {
         hls_mutex_destroy(&h->lock);
         free(h->ring);
+        free(h->vod_uri);
+        free(h->vod_dur_ms);
         free(h);
         return NULL;
     }

@@ -37,6 +37,7 @@ namespace Basis.Scripts.Device_Management.Devices.Unity_Spatial_Tracking
         {
             Device = device;
             InitialRole = basisBoneTrackedRole;
+            TrackingHardware = BasisTrackingHardware.Lighthouse;
 
             InitializeTracking(UniqueID, UnUniqueID, subSystems, AssignTrackedRole, basisBoneTrackedRole);
 
@@ -60,15 +61,37 @@ namespace Basis.Scripts.Device_Management.Devices.Unity_Spatial_Tracking
 
         public override void LateDoPollData()
         {
-            // Intentionally empty (matches your existing pattern)
+            PollPose();
         }
 
         public override void RenderPollData()
         {
+            if (!PollPose())
+            {
+                return;
+            }
+
+            // CenterEye extra simulation path
+            if (TryGetRole(out var currentRole) && currentRole == BasisBoneTrackedRole.CenterEye)
+            {
+                if (BasisOpenVRInputEye != null)
+                {
+                    BasisOpenVRInputEye.Simulate();
+                }
+            }
+
+            // Ray: same as before
+            ComputeRaycastDirection(ScaledDeviceCoord.position, ScaledDeviceCoord.rotation, Quaternion.identity);
+
+            UpdateInputEvents();
+        }
+
+        private bool PollPose()
+        {
             if (!SteamVR.active || SteamVR.instance == null || SteamVR.instance.compositor == null)
             {
                 BasisDebug.LogError("Can't Poll SteamVR was not active");
-                return;
+                return false;
             }
             // Pull latest pose directly from compositor (SteamVR way)
             result = SteamVR.instance.compositor.GetLastPoseForTrackedDeviceIndex(
@@ -79,12 +102,12 @@ namespace Basis.Scripts.Device_Management.Devices.Unity_Spatial_Tracking
 
             if (result != EVRCompositorError.None)
             {
-                return;
+                return false;
             }
 
             if (!devicePose.bPoseIsValid)
             {
-                return;
+                return false;
             }
 
             // Unscaled device coord in *real* tracking space
@@ -110,43 +133,14 @@ namespace Basis.Scripts.Device_Management.Devices.Unity_Spatial_Tracking
             // origin pose so SteamVR's per-eye render offset isn't doubled), scaled with the avatar.
             ScaledControlPositionOffset = ScaledDeviceCoord.rotation * (CenterEyeOffset * BasisHeightDriver.DeviceScale);
 
-            // CenterEye extra simulation path
-            if (TryGetRole(out var currentRole) && currentRole == BasisBoneTrackedRole.CenterEye)
-            {
-                if (BasisOpenVRInputEye != null)
-                {
-                    BasisOpenVRInputEye.Simulate();
-                }
-            }
-
             // Push into your device pipeline
             ControlOnlyAsDevice();
-
-            // Ray: same as before
-            ComputeRaycastDirection(ScaledDeviceCoord.position, ScaledDeviceCoord.rotation, Quaternion.identity);
-
-            UpdateInputEvents();
+            return true;
         }
 
         public override void ShowTrackedVisual()
         {
-            if (BasisVisualTracker == null)
-            {
-                DeviceSupportInformation match =
-                    BasisDeviceManagement.Instance.BasisDeviceNameMatcher.GetAssociatedDeviceMatchableNames(CommonDeviceIdentifier);
-
-                if (match.CanDisplayPhysicalTracker)
-                {
-                    LoadModelWithKey(match.DeviceID);
-                }
-                else
-                {
-                    if (UseFallbackModel())
-                    {
-                        LoadModelWithKey(FallbackDeviceID);
-                    }
-                }
-            }
+            ShowTrackedVisualDefaultImplementation();
         }
 
         public override void PlayHaptic(float duration = 0.25F, float amplitude = 0.5F, float frequency = 0.5F)

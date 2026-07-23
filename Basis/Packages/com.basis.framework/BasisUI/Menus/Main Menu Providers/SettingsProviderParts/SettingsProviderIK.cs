@@ -1,6 +1,10 @@
 using Basis;
 using Basis.BasisUI;
+using Basis.Scripts.BasisSdk.Players;
+using Basis.Scripts.Device_Management;
+using Basis.Scripts.Device_Management.Devices;
 using Basis.Scripts.Drivers;
+using Basis.Scripts.TransformBinders.BoneControl;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -77,8 +81,8 @@ public static class SettingsProviderIK
             customScaleToggle.OnValueChanged += visible =>
             {
                 avatarScaleSlider.gameObject.SetActive(visible);
-                tabDesc.ForceRebuild();
-                ikGroup.ForceRebuild();
+                RebuildLayout(ikGroup);
+                RebuildLayout(tabDesc);
             };
         }
 
@@ -196,6 +200,24 @@ public static class SettingsProviderIK
             fbtEnabledToggle.AssignBinding(BasisSettingsDefaults.EnableFBT);
             fbtEnabledToggle.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.fbt.tooltip"));
 
+            var trackerVisualsDropdown = PanelDropdown.CreateNewEntry(trackingParent);
+            trackerVisualsDropdown.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.trackerVisuals.title"));
+            trackerVisualsDropdown.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.trackerVisuals.tooltip"));
+            trackerVisualsDropdown.AssignLocalizedEntries(
+                new List<string>
+                {
+                    BasisSettingsDefaults.TrackerVisuals_Off,
+                    BasisSettingsDefaults.TrackerVisuals_Markers,
+                    BasisSettingsDefaults.TrackerVisuals_DeviceModels
+                },
+                new List<string>
+                {
+                    "settings.bodyTracking.trackerVisuals.off",
+                    "settings.bodyTracking.trackerVisuals.markers",
+                    "settings.bodyTracking.trackerVisuals.deviceModels"
+                });
+            trackerVisualsDropdown.AssignBinding(BasisSettingsDefaults.TrackerVisuals);
+
             var oscEnabledToggle = PanelToggle.CreateNewEntry(trackingParent);
             oscEnabledToggle.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.osc"));
             oscEnabledToggle.AssignBinding(BasisSettingsDefaults.EnableOSC);
@@ -215,6 +237,11 @@ public static class SettingsProviderIK
             footIKToggle.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.footIk"));
             footIKToggle.AssignBinding(BasisSettingsDefaults.FootIKEnabled);
             footIKToggle.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.footIk.tooltip"));
+
+            var neuralPoleToggle = PanelToggle.CreateNewEntry(trackingParent);
+            neuralPoleToggle.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.neuralPole"));
+            neuralPoleToggle.AssignBinding(BasisSettingsDefaults.FBIKNeuralPole);
+            neuralPoleToggle.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.neuralPole.tooltip"));
 
             var disableAnimInFBTToggle = PanelToggle.CreateNewEntry(trackingParent);
             disableAnimInFBTToggle.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.disableAnimFbt"));
@@ -252,41 +279,64 @@ public static class SettingsProviderIK
             collideTrackedElbowToggle.AssignBinding(BasisSettingsDefaults.FBIKCollideTrackedElbow);
             collideTrackedElbowToggle.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.collideTrackedElbow.title.tooltip"));
 
-            var chestRadiusSlider = PanelSlider.CreateAndBind(
+            // Elbow drag (no elbow tracker only). How heavy this should feel is subjective and cannot be
+            // settled offline, so the corner frequency is exposed rather than baked. The slider's minimum is
+            // a real value (1 Hz = heaviest), not a "0 means default" sentinel.
+            var elbowDragToggle = PanelToggle.CreateNewEntry(collisionParent);
+            elbowDragToggle.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.elbowDrag.title"));
+            elbowDragToggle.AssignBinding(BasisSettingsDefaults.FBIKElbowDrag);
+            elbowDragToggle.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.elbowDrag.title.tooltip"));
+
+            var elbowDragSlider = PanelSlider.CreateAndBind(
                 collisionParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestRadius.title"), 0.01f, 0.5f, false, 3, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKChestRadius);
-            if (chestRadiusSlider != null)
+                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.elbowDragHz.title"), 0.5f, 8f, false, 2, ValueDisplayMode.Raw),
+                BasisSettingsDefaults.FBIKElbowDragHz);
+            if (elbowDragSlider != null)
             {
-                chestRadiusSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestRadius.title.tooltip"));
+                elbowDragSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.elbowDragHz.title.tooltip"));
+                elbowDragSlider.Descriptor.SetActive(elbowDragToggle.Value);
+                elbowDragToggle.OnValueChanged += value =>
+                {
+                    elbowDragSlider.Descriptor.SetActive(value);
+                    RebuildLayoutChain(collisionParent, tabDesc);
+                };
             }
 
-            var collisionSkinSlider = PanelSlider.CreateAndBind(
-                collisionParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.collisionSkin.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKCollisionSkin);
-            if (collisionSkinSlider != null)
-            {
-                collisionSkinSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.collisionSkin.title.tooltip"));
-            }
+            // var chestRadiusSlider = PanelSlider.CreateAndBind(
+            //     collisionParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestRadius.title"), 0.01f, 0.5f, false, 3, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKChestRadius);
+            // if (chestRadiusSlider != null)
+            // {
+            //     chestRadiusSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestRadius.title.tooltip"));
+            // }
 
-            var handRadiusSlider = PanelSlider.CreateAndBind(
-                collisionParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.handRadius.title"), 0f, 0.2f, false, 3, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKHandRadius);
-            if (handRadiusSlider != null)
-            {
-                handRadiusSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.handRadius.title.tooltip"));
-            }
+            // var collisionSkinSlider = PanelSlider.CreateAndBind(
+            //     collisionParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.collisionSkin.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKCollisionSkin);
+            // if (collisionSkinSlider != null)
+            // {
+            //     collisionSkinSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.collisionSkin.title.tooltip"));
+            // }
 
-            var handSkinSlider = PanelSlider.CreateAndBind(
-                collisionParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.handSkin.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKHandSkin);
-            if (handSkinSlider != null)
-            {
-                handSkinSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.handSkin.title.tooltip"));
-            }
+            // var handRadiusSlider = PanelSlider.CreateAndBind(
+            //     collisionParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.handRadius.title"), 0f, 0.2f, false, 3, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKHandRadius);
+            // if (handRadiusSlider != null)
+            // {
+            //     handRadiusSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.handRadius.title.tooltip"));
+            // }
+
+            // var handSkinSlider = PanelSlider.CreateAndBind(
+            //     collisionParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.handSkin.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKHandSkin);
+            // if (handSkinSlider != null)
+            // {
+            //     handSkinSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.handSkin.title.tooltip"));
+            // }
         });
 
         // ============== Shoulders ==============
@@ -304,23 +354,23 @@ public static class SettingsProviderIK
             shoulderShrugToggle.AssignBinding(BasisSettingsDefaults.FBIKShoulderShrug);
             shoulderShrugToggle.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.shoulderShrug.title.tooltip"));
 
-            var shoulderElevSlider = PanelSlider.CreateAndBind(
-                shoulderParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.shoulderElevation.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKShoulderElevation);
-            if (shoulderElevSlider != null)
-            {
-                shoulderElevSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.shoulderElevation.title.tooltip"));
-            }
+            // var shoulderElevSlider = PanelSlider.CreateAndBind(
+            //     shoulderParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.shoulderElevation.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKShoulderElevation);
+            // if (shoulderElevSlider != null)
+            // {
+            //     shoulderElevSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.shoulderElevation.title.tooltip"));
+            // }
 
-            var shoulderProtSlider = PanelSlider.CreateAndBind(
-                shoulderParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.shoulderProtraction.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKShoulderProtraction);
-            if (shoulderProtSlider != null)
-            {
-                shoulderProtSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.shoulderProtraction.title.tooltip"));
-            }
+            // var shoulderProtSlider = PanelSlider.CreateAndBind(
+            //     shoulderParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.shoulderProtraction.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKShoulderProtraction);
+            // if (shoulderProtSlider != null)
+            // {
+            //     shoulderProtSlider.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.shoulderProtraction.title.tooltip"));
+            // }
         });
 
         // ============== Arm Twist ==============
@@ -347,36 +397,71 @@ public static class SettingsProviderIK
             }
         });
 
-        // ============== Anatomy ==============
+        // ============== Body Fit ==============
         CreateCollapsibleSection(tabDesc, colliderGroup,
-            BasisLocalization.Get("settings.bodyTracking.section.anatomy.title"),
-            BasisLocalization.Get("settings.bodyTracking.section.anatomy.description"), false, anatomyParent =>
+            BasisLocalization.Get("settings.bodyTracking.section.bodyFit.title"),
+            BasisLocalization.Get("settings.bodyTracking.section.bodyFit.description"), false, fitParent =>
         {
-            AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKAnatDifferentialStiffness,
-                "settings.bodyTracking.anat.diffStiffness.title",
-                "settings.bodyTracking.anat.diffStiffness.description");
-            AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKAnatShoulderSlide,
-                "settings.bodyTracking.anat.shoulderSlide.title",
-                "settings.bodyTracking.anat.shoulderSlide.description");
-            AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKAnatCervicalLordosis,
-                "settings.bodyTracking.anat.cervicalLordosis.title",
-                "settings.bodyTracking.anat.cervicalLordosis.description");
-            AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKAnatPelvicTwistRouting,
-                "settings.bodyTracking.anat.pelvicTwistRouting.title",
-                "settings.bodyTracking.anat.pelvicTwistRouting.description");
-            AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKSpineAnatomicalRom,
-                "settings.bodyTracking.anat.spineRom.title",
-                "settings.bodyTracking.anat.spineRom.description");
-            AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKChestIKTarget,
-                "settings.bodyTracking.anat.chestIkTarget.title",
-                "settings.bodyTracking.anat.chestIkTarget.description");
-            AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKLegSwivelSmoothing,
-                "settings.bodyTracking.anat.legSwivelSmoothing.title",
-                "settings.bodyTracking.anat.legSwivelSmoothing.description");
-            AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKTrackerBendNormal,
-                "settings.bodyTracking.anat.trackerBendNormal.title",
-                "settings.bodyTracking.anat.trackerBendNormal.description");
+            AddAnatomyToggle(fitParent, BasisSettingsDefaults.FBIKBodyFit,
+                "settings.bodyTracking.bodyFit.enabled.title",
+                "settings.bodyTracking.bodyFit.enabled.description");
+
+            var maxDeviation = PanelSlider.CreateAndBind(
+                fitParent,
+                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.bodyFit.maxDeviation.title"), 0f, Basis.IK.BasisBodyFitCore.MaxDeviationCeiling, false, 2, ValueDisplayMode.Raw),
+                BasisSettingsDefaults.FBIKBodyFitMaxDeviation);
+            if (maxDeviation != null)
+            {
+                maxDeviation.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.bodyFit.maxDeviation.tooltip"));
+            }
         });
+
+        // ============== Spine: Proportion Match (DISABLED 2026-07-18, revisit later) ==============
+        // CreateCollapsibleSection(tabDesc, colliderGroup,
+        //     BasisLocalization.Get("settings.bodyTracking.section.spineProportion.title"),
+        //     BasisLocalization.Get("settings.bodyTracking.section.spineProportion.description"), false, propParent =>
+        // {
+        //     AddAnatomyToggle(propParent, BasisSettingsDefaults.FBIKSpineProportionMatch,
+        //         "settings.bodyTracking.spineProportion.enabled.title",
+        //         "settings.bodyTracking.spineProportion.enabled.description");
+        //
+        //     var maxScale = PanelSlider.CreateAndBind(
+        //         propParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineProportion.maxScale.title"), 0f, 0.25f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineProportionMaxScale);
+        //     maxScale?.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineProportion.maxScale.tooltip"));
+        // });
+
+        // ============== Anatomy ==============
+        // CreateCollapsibleSection(tabDesc, colliderGroup,
+        //     BasisLocalization.Get("settings.bodyTracking.section.anatomy.title"),
+        //     BasisLocalization.Get("settings.bodyTracking.section.anatomy.description"), false, anatomyParent =>
+        // {
+        //     AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKAnatDifferentialStiffness,
+        //         "settings.bodyTracking.anat.diffStiffness.title",
+        //         "settings.bodyTracking.anat.diffStiffness.description");
+        //     AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKAnatShoulderSlide,
+        //         "settings.bodyTracking.anat.shoulderSlide.title",
+        //         "settings.bodyTracking.anat.shoulderSlide.description");
+        //     AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKAnatCervicalLordosis,
+        //         "settings.bodyTracking.anat.cervicalLordosis.title",
+        //         "settings.bodyTracking.anat.cervicalLordosis.description");
+        //     AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKAnatPelvicTwistRouting,
+        //         "settings.bodyTracking.anat.pelvicTwistRouting.title",
+        //         "settings.bodyTracking.anat.pelvicTwistRouting.description");
+        //     AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKSpineAnatomicalRom,
+        //         "settings.bodyTracking.anat.spineRom.title",
+        //         "settings.bodyTracking.anat.spineRom.description");
+        //     AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKChestIKTarget,
+        //         "settings.bodyTracking.anat.chestIkTarget.title",
+        //         "settings.bodyTracking.anat.chestIkTarget.description");
+        //     AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKLegSwivelSmoothing,
+        //         "settings.bodyTracking.anat.legSwivelSmoothing.title",
+        //         "settings.bodyTracking.anat.legSwivelSmoothing.description");
+        //     AddAnatomyToggle(anatomyParent, BasisSettingsDefaults.FBIKTrackerBendNormal,
+        //         "settings.bodyTracking.anat.trackerBendNormal.title",
+        //         "settings.bodyTracking.anat.trackerBendNormal.description");
+        // });
 
         // ============== Desktop head carry ==============
         // Desktop only: in VR the headset already rides the lever arm this reproduces.
@@ -394,11 +479,11 @@ public static class SettingsProviderIK
                 BasisSettingsDefaults.DesktopHeadSwingStrength);
             strength?.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.headSwing.strength.tooltip"));
 
-            var backward = PanelSlider.CreateAndBind(
-                swingParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.headSwing.backward"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.DesktopHeadSwingBackward);
-            backward?.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.headSwing.backward.tooltip"));
+            // var backward = PanelSlider.CreateAndBind(
+            //     swingParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.headSwing.backward"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.DesktopHeadSwingBackward);
+            // backward?.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.headSwing.backward.tooltip"));
         });
 
         // ============== Spine: Reach Limits ==============
@@ -444,473 +529,482 @@ public static class SettingsProviderIK
         });
 
         // ============== Spine: Bend Distribution ==============
-        CreateCollapsibleSection(tabDesc, colliderGroup,
-            BasisLocalization.Get("settings.bodyTracking.section.spineBend.title"),
-            BasisLocalization.Get("settings.bodyTracking.section.spineBend.description"), false, bendParent =>
-        {
-            var spineBendPitch = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineBendPitch.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineBendPitch);
-            if (spineBendPitch != null)
-            {
-                spineBendPitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineBendPitch.title.tooltip"));
-            }
+        // CreateCollapsibleSection(tabDesc, colliderGroup,
+        //     BasisLocalization.Get("settings.bodyTracking.section.spineBend.title"),
+        //     BasisLocalization.Get("settings.bodyTracking.section.spineBend.description"), false, bendParent =>
+        // {
+        //     var spineBendPitch = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineBendPitch.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineBendPitch);
+        //     if (spineBendPitch != null)
+        //     {
+        //         spineBendPitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineBendPitch.title.tooltip"));
+        //     }
 
-            var spineBendYaw = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineBendYaw.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineBendYaw);
-            if (spineBendYaw != null)
-            {
-                spineBendYaw.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineBendYaw.title.tooltip"));
-            }
+        //     var spineBendYaw = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineBendYaw.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineBendYaw);
+        //     if (spineBendYaw != null)
+        //     {
+        //         spineBendYaw.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineBendYaw.title.tooltip"));
+        //     }
 
-            var spineBendRoll = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineBendRoll.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineBendRoll);
-            if (spineBendRoll != null)
-            {
-                spineBendRoll.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineBendRoll.title.tooltip"));
-            }
+        //     var spineBendRoll = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineBendRoll.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineBendRoll);
+        //     if (spineBendRoll != null)
+        //     {
+        //         spineBendRoll.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineBendRoll.title.tooltip"));
+        //     }
 
-            var upperChestBendPitch = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.upperChestBendPitch.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKUpperChestBendPitch);
-            if (upperChestBendPitch != null)
-            {
-                upperChestBendPitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.upperChestBendPitch.title.tooltip"));
-            }
+        //     var upperChestBendPitch = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.upperChestBendPitch.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKUpperChestBendPitch);
+        //     if (upperChestBendPitch != null)
+        //     {
+        //         upperChestBendPitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.upperChestBendPitch.title.tooltip"));
+        //     }
 
-            var upperChestBendYaw = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.upperChestBendYaw.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKUpperChestBendYaw);
-            if (upperChestBendYaw != null)
-            {
-                upperChestBendYaw.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.upperChestBendYaw.title.tooltip"));
-            }
+        //     var upperChestBendYaw = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.upperChestBendYaw.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKUpperChestBendYaw);
+        //     if (upperChestBendYaw != null)
+        //     {
+        //         upperChestBendYaw.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.upperChestBendYaw.title.tooltip"));
+        //     }
 
-            var upperChestBendRoll = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.upperChestBendRoll.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKUpperChestBendRoll);
-            if (upperChestBendRoll != null)
-            {
-                upperChestBendRoll.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.upperChestBendRoll.title.tooltip"));
-            }
+        //     var upperChestBendRoll = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.upperChestBendRoll.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKUpperChestBendRoll);
+        //     if (upperChestBendRoll != null)
+        //     {
+        //         upperChestBendRoll.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.upperChestBendRoll.title.tooltip"));
+        //     }
 
-            var spineSquishBoost = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineSquishBoost.title"), 0f, 2f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineSquishBoost);
-            if (spineSquishBoost != null)
-            {
-                spineSquishBoost.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineSquishBoost.title.tooltip"));
-            }
+        //     var spineSquishBoost = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineSquishBoost.title"), 0f, 2f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineSquishBoost);
+        //     if (spineSquishBoost != null)
+        //     {
+        //         spineSquishBoost.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineSquishBoost.title.tooltip"));
+        //     }
 
-            var spineGazeFollow = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineGazeFollow.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineGazeFollow);
-            if (spineGazeFollow != null)
-            {
-                spineGazeFollow.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineGazeFollow.title.tooltip"));
-            }
+        //     var spineGazeFollow = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineGazeFollow.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineGazeFollow);
+        //     if (spineGazeFollow != null)
+        //     {
+        //         spineGazeFollow.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineGazeFollow.title.tooltip"));
+        //     }
 
-            var neckGazeFollow = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.neckGazeFollow.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKNeckGazeFollow);
-            if (neckGazeFollow != null)
-            {
-                neckGazeFollow.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.neckGazeFollow.title.tooltip"));
-            }
+        //     var neckGazeFollow = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.neckGazeFollow.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKNeckGazeFollow);
+        //     if (neckGazeFollow != null)
+        //     {
+        //         neckGazeFollow.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.neckGazeFollow.title.tooltip"));
+        //     }
 
-            var spineMaxFwd = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineMaxForward.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineMaxForwardDeg);
-            if (spineMaxFwd != null)
-            {
-                spineMaxFwd.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineMaxForward.title.tooltip"));
-            }
+        //     var spineMaxFwd = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineMaxForward.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineMaxForwardDeg);
+        //     if (spineMaxFwd != null)
+        //     {
+        //         spineMaxFwd.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineMaxForward.title.tooltip"));
+        //     }
 
-            var spineMaxBack = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineMaxBackward.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineMaxBackwardDeg);
-            if (spineMaxBack != null)
-            {
-                spineMaxBack.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineMaxBackward.title.tooltip"));
-            }
+        //     var spineMaxBack = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineMaxBackward.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineMaxBackwardDeg);
+        //     if (spineMaxBack != null)
+        //     {
+        //         spineMaxBack.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineMaxBackward.title.tooltip"));
+        //     }
 
-            var spineMaxLat = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineMaxLateral.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineMaxLateralDeg);
-            if (spineMaxLat != null)
-            {
-                spineMaxLat.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineMaxLateral.title.tooltip"));
-            }
+        //     var spineMaxLat = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineMaxLateral.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineMaxLateralDeg);
+        //     if (spineMaxLat != null)
+        //     {
+        //         spineMaxLat.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineMaxLateral.title.tooltip"));
+        //     }
 
-            var neckMaxCone = PanelSlider.CreateAndBind(
-                bendParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.neckMaxCone.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKNeckMaxConeDeg);
-            if (neckMaxCone != null)
-            {
-                neckMaxCone.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.neckMaxCone.title.tooltip"));
-            }
-        });
+        //     var neckMaxCone = PanelSlider.CreateAndBind(
+        //         bendParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.neckMaxCone.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKNeckMaxConeDeg);
+        //     if (neckMaxCone != null)
+        //     {
+        //         neckMaxCone.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.neckMaxCone.title.tooltip"));
+        //     }
+        // });
 
         // ============== Spine: Dynamics ==============
-        CreateCollapsibleSection(tabDesc, colliderGroup,
-            BasisLocalization.Get("settings.bodyTracking.section.spineDynamics.title"),
-            BasisLocalization.Get("settings.bodyTracking.section.spineDynamics.description"), false, dynamicsParent =>
-        {
-            var hipHingeStart = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.hipHingeStart.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKHipHingeStartDeg);
-            if (hipHingeStart != null)
-            {
-                hipHingeStart.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.hipHingeStart.title.tooltip"));
-            }
+        // CreateCollapsibleSection(tabDesc, colliderGroup,
+        //     BasisLocalization.Get("settings.bodyTracking.section.spineDynamics.title"),
+        //     BasisLocalization.Get("settings.bodyTracking.section.spineDynamics.description"), false, dynamicsParent =>
+        // {
+        //     var hipHingeStart = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.hipHingeStart.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKHipHingeStartDeg);
+        //     if (hipHingeStart != null)
+        //     {
+        //         hipHingeStart.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.hipHingeStart.title.tooltip"));
+        //     }
 
-            var hipHingeMax = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.hipHingeMaxAdd.title"), 0f, 60f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKHipHingeMaxAddDeg);
-            if (hipHingeMax != null)
-            {
-                hipHingeMax.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.hipHingeMaxAdd.title.tooltip"));
-            }
+        //     var hipHingeMax = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.hipHingeMaxAdd.title"), 0f, 60f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKHipHingeMaxAddDeg);
+        //     if (hipHingeMax != null)
+        //     {
+        //         hipHingeMax.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.hipHingeMaxAdd.title.tooltip"));
+        //     }
 
-            var moveBodyBack = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.moveBodyBackWhenCrouching.title"), 0f, 2f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKMoveBodyBackWhenCrouching);
-            if (moveBodyBack != null)
-            {
-                moveBodyBack.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.moveBodyBackWhenCrouching.title.tooltip"));
-            }
+        //     var moveBodyBack = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.moveBodyBackWhenCrouching.title"), 0f, 2f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKMoveBodyBackWhenCrouching);
+        //     if (moveBodyBack != null)
+        //     {
+        //         moveBodyBack.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.moveBodyBackWhenCrouching.title.tooltip"));
+        //     }
 
-            var elbowSwingToggle = PanelToggle.CreateNewEntry(dynamicsParent);
-            elbowSwingToggle.Descriptor.SetTitle("Elbow Swing Smoothing");
-            elbowSwingToggle.AssignBinding(BasisSettingsDefaults.FBIKElbowSwingEnabled);
-            elbowSwingToggle.Descriptor.SetTooltip("Rate-limits the elbow/knee swing and how fast a torso-collision push eases in. Off = the elbow swings freely (test for over-damping).");
+        //     var trunkCounterbalance = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.trunkCounterbalance.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKTrunkCounterbalance);
+        //     if (trunkCounterbalance != null)
+        //     {
+        //         trunkCounterbalance.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.trunkCounterbalance.title.tooltip"));
+        //     }
 
-            var swingSmooth = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.swingSmoothRate.title"), 0f, 3600f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSwingSmoothRate);
-            if (swingSmooth != null)
-            {
-                swingSmooth.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.swingSmoothRate.title.tooltip"));
-            }
+        //     var elbowSwingToggle = PanelToggle.CreateNewEntry(dynamicsParent);
+        //     elbowSwingToggle.Descriptor.SetTitle("Elbow Swing Smoothing");
+        //     elbowSwingToggle.AssignBinding(BasisSettingsDefaults.FBIKElbowSwingEnabled);
+        //     elbowSwingToggle.Descriptor.SetTooltip("Rate-limits the elbow/knee swing and how fast a torso-collision push eases in. Off = the elbow swings freely (test for over-damping).");
 
-            var chestSpringHz = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestSpringHz.title"), 0f, 30f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKChestSpringHz);
-            if (chestSpringHz != null)
-            {
-                chestSpringHz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestSpringHz.title.tooltip"));
-            }
+        //     var swingSmooth = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.swingSmoothRate.title"), 0f, 3600f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSwingSmoothRate);
+        //     if (swingSmooth != null)
+        //     {
+        //         swingSmooth.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.swingSmoothRate.title.tooltip"));
+        //     }
 
-            var chestSpringDamping = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestSpringDamping.title"), 0f, 2f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKChestSpringDamping);
-            if (chestSpringDamping != null)
-            {
-                chestSpringDamping.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestSpringDamping.title.tooltip"));
-            }
+        //     var chestSpringHz = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestSpringHz.title"), 0f, 30f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKChestSpringHz);
+        //     if (chestSpringHz != null)
+        //     {
+        //         chestSpringHz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestSpringHz.title.tooltip"));
+        //     }
 
-            var spineCcdRelax = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineCcdRelax.title"), 0.1f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineCCDRelax);
-            if (spineCcdRelax != null)
-            {
-                spineCcdRelax.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineCcdRelax.title.tooltip"));
-            }
+        //     var chestSpringDamping = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestSpringDamping.title"), 0f, 2f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKChestSpringDamping);
+        //     if (chestSpringDamping != null)
+        //     {
+        //         chestSpringDamping.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestSpringDamping.title.tooltip"));
+        //     }
 
-            var spineTwistKeep = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineTwistKeep.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineTwistKeep);
-            if (spineTwistKeep != null)
-            {
-                spineTwistKeep.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineTwistKeep.title.tooltip"));
-            }
+        //     var spineCcdRelax = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineCcdRelax.title"), 0.1f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineCCDRelax);
+        //     if (spineCcdRelax != null)
+        //     {
+        //         spineCcdRelax.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineCcdRelax.title.tooltip"));
+        //     }
 
-            var spineNeckTwistKeep = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineNeckTwistKeep.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKSpineNeckTwistKeep);
-            if (spineNeckTwistKeep != null)
-            {
-                spineNeckTwistKeep.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineNeckTwistKeep.title.tooltip"));
-            }
+        //     var spineTwistKeep = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineTwistKeep.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineTwistKeep);
+        //     if (spineTwistKeep != null)
+        //     {
+        //         spineTwistKeep.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineTwistKeep.title.tooltip"));
+        //     }
 
-            var chestArmSwingFactor = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestArmSwingFactor.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKChestArmSwingFactor);
-            if (chestArmSwingFactor != null)
-            {
-                chestArmSwingFactor.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestArmSwingFactor.title.tooltip"));
-            }
+        //     var spineNeckTwistKeep = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.spineNeckTwistKeep.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKSpineNeckTwistKeep);
+        //     if (spineNeckTwistKeep != null)
+        //     {
+        //         spineNeckTwistKeep.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.spineNeckTwistKeep.title.tooltip"));
+        //     }
 
-            var chestArmSwingMaxDeg = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestArmSwingMax.title"), 0f, 30f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKChestArmSwingMaxDeg);
-            if (chestArmSwingMaxDeg != null)
-            {
-                chestArmSwingMaxDeg.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestArmSwingMax.title.tooltip"));
-            }
+        //     var chestArmSwingFactor = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestArmSwingFactor.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKChestArmSwingFactor);
+        //     if (chestArmSwingFactor != null)
+        //     {
+        //         chestArmSwingFactor.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestArmSwingFactor.title.tooltip"));
+        //     }
 
-            var lordosisPitchGain = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisPitchGain.title"), 0f, 30f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisPitchGainDeg);
-            if (lordosisPitchGain != null)
-            {
-                lordosisPitchGain.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisPitchGain.title.tooltip"));
-            }
+        //     var chestArmSwingMaxDeg = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.chestArmSwingMax.title"), 0f, 30f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKChestArmSwingMaxDeg);
+        //     if (chestArmSwingMaxDeg != null)
+        //     {
+        //         chestArmSwingMaxDeg.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.chestArmSwingMax.title.tooltip"));
+        //     }
 
-            var lordosisBase = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisBase.title"), 0f, 15f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisBaseDeg);
-            if (lordosisBase != null)
-            {
-                lordosisBase.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisBase.title.tooltip"));
-            }
+        //     var lordosisPitchGain = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisPitchGain.title"), 0f, 30f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisPitchGainDeg);
+        //     if (lordosisPitchGain != null)
+        //     {
+        //         lordosisPitchGain.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisPitchGain.title.tooltip"));
+        //     }
 
-            var lordosisNeckShare = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisNeckShare.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisNeckShare);
-            if (lordosisNeckShare != null)
-            {
-                lordosisNeckShare.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisNeckShare.title.tooltip"));
-            }
+        //     var lordosisBase = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisBase.title"), 0f, 15f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisBaseDeg);
+        //     if (lordosisBase != null)
+        //     {
+        //         lordosisBase.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisBase.title.tooltip"));
+        //     }
 
-            var lordosisMaxHeadPitch = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisMaxHeadPitch.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisMaxHeadPitchDeg);
-            if (lordosisMaxHeadPitch != null)
-            {
-                lordosisMaxHeadPitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisMaxHeadPitch.title.tooltip"));
-            }
+        //     var lordosisNeckShare = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisNeckShare.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisNeckShare);
+        //     if (lordosisNeckShare != null)
+        //     {
+        //         lordosisNeckShare.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisNeckShare.title.tooltip"));
+        //     }
 
-            var lordosisExtremeStart = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeStart.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeStartDeg);
-            if (lordosisExtremeStart != null)
-            {
-                lordosisExtremeStart.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeStart.title.tooltip"));
-            }
+        //     var lordosisMaxHeadPitch = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisMaxHeadPitch.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisMaxHeadPitchDeg);
+        //     if (lordosisMaxHeadPitch != null)
+        //     {
+        //         lordosisMaxHeadPitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisMaxHeadPitch.title.tooltip"));
+        //     }
 
-            var lordosisExtremeFull = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeFull.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeFullDeg);
-            if (lordosisExtremeFull != null)
-            {
-                lordosisExtremeFull.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeFull.title.tooltip"));
-            }
+        //     var lordosisExtremeStart = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeStart.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeStartDeg);
+        //     if (lordosisExtremeStart != null)
+        //     {
+        //         lordosisExtremeStart.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeStart.title.tooltip"));
+        //     }
 
-            var lordosisExtremeRollFwd = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeRollForward.title"), 0f, 30f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeRollForwardMaxDeg);
-            if (lordosisExtremeRollFwd != null)
-            {
-                lordosisExtremeRollFwd.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeRollForward.title.tooltip"));
-            }
+        //     var lordosisExtremeFull = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeFull.title"), 0f, 90f, false, 0, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeFullDeg);
+        //     if (lordosisExtremeFull != null)
+        //     {
+        //         lordosisExtremeFull.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeFull.title.tooltip"));
+        //     }
 
-            var lordosisExtremeRollBack = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeRollBackward.title"), 0f, 30f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeRollBackwardMaxDeg);
-            if (lordosisExtremeRollBack != null)
-            {
-                lordosisExtremeRollBack.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeRollBackward.title.tooltip"));
-            }
+        //     var lordosisExtremeRollFwd = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeRollForward.title"), 0f, 30f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeRollForwardMaxDeg);
+        //     if (lordosisExtremeRollFwd != null)
+        //     {
+        //         lordosisExtremeRollFwd.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeRollForward.title.tooltip"));
+        //     }
 
-            var lordosisExtremeHipsHoriz = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsHoriz.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeHipsHorizontalMax);
-            if (lordosisExtremeHipsHoriz != null)
-            {
-                lordosisExtremeHipsHoriz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsHoriz.title.tooltip"));
-            }
+        //     var lordosisExtremeRollBack = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeRollBackward.title"), 0f, 30f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeRollBackwardMaxDeg);
+        //     if (lordosisExtremeRollBack != null)
+        //     {
+        //         lordosisExtremeRollBack.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeRollBackward.title.tooltip"));
+        //     }
 
-            var lordosisExtremeChestHoriz = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestHoriz.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeChestHorizontalMax);
-            if (lordosisExtremeChestHoriz != null)
-            {
-                lordosisExtremeChestHoriz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestHoriz.title.tooltip"));
-            }
+        //     var lordosisExtremeHipsHoriz = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsHoriz.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeHipsHorizontalMax);
+        //     if (lordosisExtremeHipsHoriz != null)
+        //     {
+        //         lordosisExtremeHipsHoriz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsHoriz.title.tooltip"));
+        //     }
 
-            var lordosisExtremeHipsDown = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsDown.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeHipsDownMax);
-            if (lordosisExtremeHipsDown != null)
-            {
-                lordosisExtremeHipsDown.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsDown.title.tooltip"));
-            }
+        //     var lordosisExtremeChestHoriz = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestHoriz.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeChestHorizontalMax);
+        //     if (lordosisExtremeChestHoriz != null)
+        //     {
+        //         lordosisExtremeChestHoriz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestHoriz.title.tooltip"));
+        //     }
 
-            var lordosisExtremeChestDown = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestDown.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeChestDownMax);
-            if (lordosisExtremeChestDown != null)
-            {
-                lordosisExtremeChestDown.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestDown.title.tooltip"));
-            }
+        //     var lordosisExtremeHipsDown = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsDown.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeHipsDownMax);
+        //     if (lordosisExtremeHipsDown != null)
+        //     {
+        //         lordosisExtremeHipsDown.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsDown.title.tooltip"));
+        //     }
 
-            var lordosisExtremeHipsDownLookUp = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsDownLookUp.title"), 0f, 0.01f, false, 4, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeHipsDownLookUp);
-            if (lordosisExtremeHipsDownLookUp != null)
-            {
-                lordosisExtremeHipsDownLookUp.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsDownLookUp.title.tooltip"));
-            }
+        //     var lordosisExtremeChestDown = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestDown.title"), 0f, 0.1f, false, 3, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeChestDownMax);
+        //     if (lordosisExtremeChestDown != null)
+        //     {
+        //         lordosisExtremeChestDown.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestDown.title.tooltip"));
+        //     }
 
-            var lordosisExtremeChestDownLookUp = PanelSlider.CreateAndBind(
-                dynamicsParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestDownLookUp.title"), 0f, 0.01f, false, 4, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKLordosisExtremeChestDownLookUp);
-            if (lordosisExtremeChestDownLookUp != null)
-            {
-                lordosisExtremeChestDownLookUp.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestDownLookUp.title.tooltip"));
-            }
-        });
+        //     var lordosisExtremeHipsDownLookUp = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsDownLookUp.title"), 0f, 0.01f, false, 4, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeHipsDownLookUp);
+        //     if (lordosisExtremeHipsDownLookUp != null)
+        //     {
+        //         lordosisExtremeHipsDownLookUp.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeHipsDownLookUp.title.tooltip"));
+        //     }
+
+        //     var lordosisExtremeChestDownLookUp = PanelSlider.CreateAndBind(
+        //         dynamicsParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestDownLookUp.title"), 0f, 0.01f, false, 4, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.FBIKLordosisExtremeChestDownLookUp);
+        //     if (lordosisExtremeChestDownLookUp != null)
+        //     {
+        //         lordosisExtremeChestDownLookUp.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.lordosisExtremeChestDownLookUp.title.tooltip"));
+        //     }
+        // });
 
         // ============== Virtual Spine (no torso tracker) ==============
-        CreateCollapsibleSection(tabDesc, colliderGroup,
-            BasisLocalization.Get("settings.bodyTracking.section.virtualSpine.title"),
-            BasisLocalization.Get("settings.bodyTracking.section.virtualSpine.description"), false, vspineParent =>
-        {
-            var vspineChestPitch = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineChestPitchFrac.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineChestPitchFrac);
-            if (vspineChestPitch != null)
-            {
-                vspineChestPitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineChestPitchFrac.title.tooltip"));
-            }
+        // CreateCollapsibleSection(tabDesc, colliderGroup,
+        //     BasisLocalization.Get("settings.bodyTracking.section.virtualSpine.title"),
+        //     BasisLocalization.Get("settings.bodyTracking.section.virtualSpine.description"), false, vspineParent =>
+        // {
+        //     var vspineChestPitch = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineChestPitchFrac.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineChestPitchFrac);
+        //     if (vspineChestPitch != null)
+        //     {
+        //         vspineChestPitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineChestPitchFrac.title.tooltip"));
+        //     }
 
-            var vspineChestRoll = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineChestRollFrac.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineChestRollFrac);
-            if (vspineChestRoll != null)
-            {
-                vspineChestRoll.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineChestRollFrac.title.tooltip"));
-            }
+        //     var vspineChestRoll = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineChestRollFrac.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineChestRollFrac);
+        //     if (vspineChestRoll != null)
+        //     {
+        //         vspineChestRoll.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineChestRollFrac.title.tooltip"));
+        //     }
 
-            var vspineSpinePitch = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineSpinePitchFrac.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineSpinePitchFrac);
-            if (vspineSpinePitch != null)
-            {
-                vspineSpinePitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineSpinePitchFrac.title.tooltip"));
-            }
+        //     var vspineSpinePitch = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineSpinePitchFrac.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineSpinePitchFrac);
+        //     if (vspineSpinePitch != null)
+        //     {
+        //         vspineSpinePitch.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineSpinePitchFrac.title.tooltip"));
+        //     }
 
-            var vspineSpineRoll = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineSpineRollFrac.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineSpineRollFrac);
-            if (vspineSpineRoll != null)
-            {
-                vspineSpineRoll.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineSpineRollFrac.title.tooltip"));
-            }
+        //     var vspineSpineRoll = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineSpineRollFrac.title"), 0f, 1f, false, 2, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineSpineRollFrac);
+        //     if (vspineSpineRoll != null)
+        //     {
+        //         vspineSpineRoll.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineSpineRollFrac.title.tooltip"));
+        //     }
 
-            var vspineNeckRotSpeed = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineNeckRotationSpeed.title"), 0f, 100f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineNeckRotationSpeed);
-            if (vspineNeckRotSpeed != null)
-            {
-                vspineNeckRotSpeed.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineNeckRotationSpeed.title.tooltip"));
-            }
+        //     var vspineNeckRotSpeed = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineNeckRotationSpeed.title"), 0f, 100f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineNeckRotationSpeed);
+        //     if (vspineNeckRotSpeed != null)
+        //     {
+        //         vspineNeckRotSpeed.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineNeckRotationSpeed.title.tooltip"));
+        //     }
 
-            var vspineChestRotSpeed = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineChestRotationSpeed.title"), 0f, 100f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineChestRotationSpeed);
-            if (vspineChestRotSpeed != null)
-            {
-                vspineChestRotSpeed.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineChestRotationSpeed.title.tooltip"));
-            }
+        //     var vspineChestRotSpeed = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineChestRotationSpeed.title"), 0f, 100f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineChestRotationSpeed);
+        //     if (vspineChestRotSpeed != null)
+        //     {
+        //         vspineChestRotSpeed.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineChestRotationSpeed.title.tooltip"));
+        //     }
 
-            var vspineSpineRotSpeed = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineSpineRotationSpeed.title"), 0f, 100f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineSpineRotationSpeed);
-            if (vspineSpineRotSpeed != null)
-            {
-                vspineSpineRotSpeed.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineSpineRotationSpeed.title.tooltip"));
-            }
+        //     var vspineSpineRotSpeed = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineSpineRotationSpeed.title"), 0f, 100f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineSpineRotationSpeed);
+        //     if (vspineSpineRotSpeed != null)
+        //     {
+        //         vspineSpineRotSpeed.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineSpineRotationSpeed.title.tooltip"));
+        //     }
 
-            var vspineHipsRotSpeed = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineHipsRotationSpeed.title"), 0f, 100f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineHipsRotationSpeed);
-            if (vspineHipsRotSpeed != null)
-            {
-                vspineHipsRotSpeed.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineHipsRotationSpeed.title.tooltip"));
-            }
+        //     var vspineHipsRotSpeed = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineHipsRotationSpeed.title"), 0f, 100f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineHipsRotationSpeed);
+        //     if (vspineHipsRotSpeed != null)
+        //     {
+        //         vspineHipsRotSpeed.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineHipsRotationSpeed.title.tooltip"));
+        //     }
 
-            var vspineHipsFwd = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineHipsForwardBias.title"), -0.1f, 0.1f, false, 3, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineHipsForwardBias);
-            if (vspineHipsFwd != null)
-            {
-                vspineHipsFwd.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineHipsForwardBias.title.tooltip"));
-            }
+        //     var vspineHipsFwd = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineHipsForwardBias.title"), -0.1f, 0.1f, false, 3, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineHipsForwardBias);
+        //     if (vspineHipsFwd != null)
+        //     {
+        //         vspineHipsFwd.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineHipsForwardBias.title.tooltip"));
+        //     }
 
-            var vspineTorsoYawDeadzone = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawDeadzone.title"), 0f, 90f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineTorsoYawDeadzoneDeg);
-            if (vspineTorsoYawDeadzone != null)
-            {
-                vspineTorsoYawDeadzone.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawDeadzone.title.tooltip"));
-            }
+        //     var vspineTorsoYawDeadzone = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawDeadzone.title"), 0f, 90f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineTorsoYawDeadzoneDeg);
+        //     if (vspineTorsoYawDeadzone != null)
+        //     {
+        //         vspineTorsoYawDeadzone.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawDeadzone.title.tooltip"));
+        //     }
 
-            var vspineTorsoYawBlend = PanelSlider.CreateAndBind(
-                vspineParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawBlend.title"), 1f, 60f, false, 1, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.VSpineTorsoYawBlendSpeed);
-            if (vspineTorsoYawBlend != null)
-            {
-                vspineTorsoYawBlend.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawBlend.title.tooltip"));
-            }
+        //     var vspineTorsoYawBlend = PanelSlider.CreateAndBind(
+        //         vspineParent,
+        //         PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawBlend.title"), 1f, 60f, false, 1, ValueDisplayMode.Raw),
+        //         BasisSettingsDefaults.VSpineTorsoYawBlendSpeed);
+        //     if (vspineTorsoYawBlend != null)
+        //     {
+        //         vspineTorsoYawBlend.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawBlend.title.tooltip"));
+        //     }
 
-            var vspineTorsoYawPlayInVR = PanelToggle.CreateNewEntry(vspineParent);
-            vspineTorsoYawPlayInVR.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawPlayInVR.title"));
-            vspineTorsoYawPlayInVR.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawPlayInVR.title.tooltip"));
-            vspineTorsoYawPlayInVR.AssignBinding(BasisSettingsDefaults.VSpineTorsoYawPlayInVR);
-        });
+        //     var vspineTorsoYawPlayInVR = PanelToggle.CreateNewEntry(vspineParent);
+        //     vspineTorsoYawPlayInVR.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawPlayInVR.title"));
+        //     vspineTorsoYawPlayInVR.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.vspineTorsoYawPlayInVR.title.tooltip"));
+        //     vspineTorsoYawPlayInVR.AssignBinding(BasisSettingsDefaults.VSpineTorsoYawPlayInVR);
+        // });
 
         // ============== Smoothing (One Euro) ==============
         CreateCollapsibleSection(tabDesc, colliderGroup,
@@ -926,64 +1020,69 @@ public static class SettingsProviderIK
                 smoothingStrength.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.smoothingStrength.title.tooltip"));
             }
 
-            var posHz = PanelSlider.CreateAndBind(
-                smoothingParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.posSmoothingHz.title"), 0.01f, 60f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKPositionSmoothingHz);
-            if (posHz != null)
+            for (int Index = 0; Index < BasisSettingsDefaults.FBIKSmoothingGroups.Length; Index++)
             {
-                posHz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.posSmoothingHz.title.tooltip"));
+                AddSmoothingGroup(tabDesc, smoothingParent, BasisSettingsDefaults.FBIKSmoothingGroups[Index]);
             }
 
-            var rotHz = PanelSlider.CreateAndBind(
-                smoothingParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.rotSmoothingHz.title"), 0.01f, 60f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKRotationSmoothingHz);
-            if (rotHz != null)
-            {
-                rotHz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.rotSmoothingHz.title.tooltip"));
-            }
+            // var posHz = PanelSlider.CreateAndBind(
+            //     smoothingParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.posSmoothingHz.title"), 0.01f, 60f, false, 2, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKPositionSmoothingHz);
+            // if (posHz != null)
+            // {
+            //     posHz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.posSmoothingHz.title.tooltip"));
+            // }
 
-            var minCutoff = PanelSlider.CreateAndBind(
-                smoothingParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.minCutoff.title"), 0.1f, 10f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKMinCutoff);
-            if (minCutoff != null)
-            {
-                minCutoff.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.minCutoff.title.tooltip"));
-            }
+            // var rotHz = PanelSlider.CreateAndBind(
+            //     smoothingParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.rotSmoothingHz.title"), 0.01f, 60f, false, 2, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKRotationSmoothingHz);
+            // if (rotHz != null)
+            // {
+            //     rotHz.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.rotSmoothingHz.title.tooltip"));
+            // }
 
-            var beta = PanelSlider.CreateAndBind(
-                smoothingParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.beta.title"), 0f, 10f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKBeta);
-            if (beta != null)
-            {
-                beta.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.beta.title.tooltip"));
-            }
+            // var minCutoff = PanelSlider.CreateAndBind(
+            //     smoothingParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.minCutoff.title"), 0.1f, 10f, false, 2, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKMinCutoff);
+            // if (minCutoff != null)
+            // {
+            //     minCutoff.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.minCutoff.title.tooltip"));
+            // }
 
-            var derivativeCutoff = PanelSlider.CreateAndBind(
-                smoothingParent,
-                PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.derivativeCutoff.title"), 0.1f, 10f, false, 2, ValueDisplayMode.Raw),
-                BasisSettingsDefaults.FBIKDerivativeCutoff);
-            if (derivativeCutoff != null)
-            {
-                derivativeCutoff.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.derivativeCutoff.title.tooltip"));
-            }
+            // var beta = PanelSlider.CreateAndBind(
+            //     smoothingParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.beta.title"), 0f, 10f, false, 2, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKBeta);
+            // if (beta != null)
+            // {
+            //     beta.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.beta.title.tooltip"));
+            // }
+
+            // var derivativeCutoff = PanelSlider.CreateAndBind(
+            //     smoothingParent,
+            //     PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("settings.bodyTracking.derivativeCutoff.title"), 0.1f, 10f, false, 2, ValueDisplayMode.Raw),
+            //     BasisSettingsDefaults.FBIKDerivativeCutoff);
+            // if (derivativeCutoff != null)
+            // {
+            //     derivativeCutoff.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.derivativeCutoff.title.tooltip"));
+            // }
         });
 
         colliderGroup.gameObject.SetActive(BasisSettingsDefaults.FBIKAdvancedVisible.RawValue);
         advancedToggle.OnExpandedChanged += visible =>
         {
             colliderGroup.gameObject.SetActive(visible);
-            tabDesc.ForceRebuild();
-            colliderGroup.GetComponentInParent<PanelElementDescriptor>()?.ForceRebuild();
+            RebuildLayout(colliderGroup.GetComponentInParent<PanelElementDescriptor>());
+            RebuildLayout(tabDesc);
         };
 
         PanelSectionToggleHelpers.FinalizeCollapsibleGroup(ikSectionToggle, ikGroup, false, _ =>
         {
-            ikGroup.ForceRebuild();
-            tabDesc.ForceRebuild();
+            RebuildLayout(ikGroup);
+            RebuildLayout(tabDesc);
         });
 
         // ------------------
@@ -994,7 +1093,7 @@ public static class SettingsProviderIK
         // ONE RESET BUTTON FOR THIS PAGE — kept last so debug info sits above it.
         SettingsProvider.AddResetPageButton(tabDesc.ContentParent, "Body Tracking", ResetIkDefaults);
 
-        tabDesc.ForceRebuild();
+        RebuildLayout(tabDesc);
         return tabPage;
     }
 
@@ -1034,10 +1133,13 @@ public static class SettingsProviderIK
         _debugCategories.Clear();
 
         AddDebugCategory(debugParent, BasisLocalization.Get("settings.bodyTracking.debug.playerMetrics"),
-            "Player Eye Height", "Player Arm Span");
+            "Player Eye Height", "Player Arm Span", "Player Hip Height", "Player Eye To Hip Drop",
+            "Player Ape Index", "Player Leg Fraction");
 
         AddDebugCategory(debugParent, BasisLocalization.Get("settings.bodyTracking.debug.avatarMetrics"),
-            "Avatar Eye Height", "Avatar Arm Span");
+            "Avatar Eye Height", "Avatar Arm Span", "Avatar Arm Span (fitted)", "Avatar Hip Height",
+            "Avatar Leg Span", "Avatar Spine Span", "Avatar Shoulder Width", "Avatar Arm Length",
+            "Avatar Ape Index", "Avatar Leg Fraction");
 
         AddDebugCategory(debugParent, BasisLocalization.Get("settings.bodyTracking.debug.scaledHeights"),
             "Scaled Player Height", "Scaled Avatar Height");
@@ -1050,6 +1152,13 @@ public static class SettingsProviderIK
 
         AddDebugCategory(debugParent, BasisLocalization.Get("settings.bodyTracking.debug.calibrationState"),
             "Height Mode", "Seated Mode", "Seated Height Delta", "Height Grounding Offset");
+
+        AddDebugCategory(debugParent, BasisLocalization.Get("settings.bodyTracking.debug.bodyFit"),
+            "Body Fit", "Body Fit Max Deviation", "Arm Fit", "Body Fit Arm Scale", "Body Fit Arm Length",
+            "Body Fit Player Arm Length", "Body Fit Arm Ratio (raw)",
+            "Hand Device To Wrist L", "Hand Device To Wrist R",
+            "Leg & Spine Fit", "Body Fit Leg Scale", "Body Fit Torso Scale", "Body Fit Hip Height",
+            "Body Fit Head Height Shift");
 
         var refreshButton = PanelButton.CreateNew(debugParent);
         refreshButton.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.refreshDebug"));
@@ -1067,7 +1176,7 @@ public static class SettingsProviderIK
             {
                 RefreshDebugData();
             }
-            tabDesc.ForceRebuild();
+            RebuildLayout(tabDesc);
         };
     }
 
@@ -1102,6 +1211,9 @@ public static class SettingsProviderIK
         "Player Arm Span" => $"{BasisHeightDriver.PlayerArmSpan:F4} m",
         "Avatar Eye Height" => $"{BasisHeightDriver.AvatarEyeHeight:F4} m",
         "Avatar Arm Span" => $"{BasisHeightDriver.AvatarArmSpan:F4} m",
+        "Avatar Arm Span (fitted)" => Mathf.Approximately(BasisHeightDriver.EffectiveAvatarArmSpan, BasisHeightDriver.AvatarArmSpan)
+            ? $"{BasisHeightDriver.AvatarArmSpan:F4} m (unchanged)"
+            : $"{BasisHeightDriver.EffectiveAvatarArmSpan:F4} m (authored {BasisHeightDriver.AvatarArmSpan:F4})",
         "Scaled Player Height" => $"{BasisHeightDriver.SelectedScaledPlayerHeight:F4} m",
         "Scaled Avatar Height" => $"{BasisHeightDriver.SelectedScaledAvatarHeight:F4} m",
         "Unscaled Player Height" => $"{BasisHeightDriver.SelectedUnScaledPlayerHeight:F4} m",
@@ -1117,17 +1229,154 @@ public static class SettingsProviderIK
         "Seated Mode" => SMModuleSitStand.IsSteatedMode ? "Seated" : "Standing",
         "Seated Height Delta" => $"{SMModuleSitStand.MissingHeightDelta:F4} m",
         "Height Grounding Offset" => $"{BasisHeightDriver.HeightModeGroundingOffset:F4} m",
+
+        "Player Hip Height" => BasisHeightDriver.PlayerHipHeight > 0f
+            ? $"{BasisHeightDriver.PlayerHipHeight:F4} m"
+            : "-- (no hips tracker)",
+        "Player Eye To Hip Drop" => BasisHeightDriver.PlayerEyeToHipDrop > 0f
+            ? $"{BasisHeightDriver.PlayerEyeToHipDrop:F4} m"
+            : "-- (no hips tracker)",
+        "Player Ape Index" => Ratio(BasisHeightDriver.PlayerArmSpan, BasisHeightDriver.PlayerEyeHeight),
+        "Player Leg Fraction" => Ratio(BasisHeightDriver.PlayerHipHeight, BasisHeightDriver.PlayerEyeHeight),
+
+        "Avatar Hip Height" => $"{BasisHeightDriver.AvatarHipHeight:F4} m",
+        "Avatar Leg Span" => $"{BasisHeightDriver.AvatarLegSpan:F4} m",
+        "Avatar Spine Span" => $"{BasisHeightDriver.AvatarSpineSpan:F4} m",
+        "Avatar Shoulder Width" => $"{BasisHeightDriver.AvatarShoulderWidth:F4} m",
+        "Avatar Arm Length" => $"{AvatarArmLength():F4} m",
+        "Avatar Ape Index" => Ratio(BasisHeightDriver.AvatarArmSpan, BasisHeightDriver.AvatarEyeHeight),
+        "Avatar Leg Fraction" => Ratio(BasisHeightDriver.AvatarHipHeight, BasisHeightDriver.AvatarEyeHeight),
+
+        "Body Fit" => BodyFitStatus(),
+        "Body Fit Max Deviation" => $"{BasisSettingsDefaults.FBIKBodyFitMaxDeviation.RawValue:P1}",
+        "Arm Fit" => FitReason(BasisLocalRigDriver.AppliedBodyFit.ArmStatus),
+        "Leg & Spine Fit" => FitReason(BasisLocalRigDriver.AppliedBodyFit.BodyStatus),
+        "Body Fit Arm Scale" => ScaleMetric(BasisLocalRigDriver.AppliedBodyFit.ArmScale, BasisLocalRigDriver.AppliedBodyFit.HasArmFit),
+        "Body Fit Leg Scale" => ScaleMetric(BasisLocalRigDriver.AppliedBodyFit.LegScale, BasisLocalRigDriver.AppliedBodyFit.HasBodyFit),
+        "Body Fit Torso Scale" => ScaleMetric(BasisLocalRigDriver.AppliedBodyFit.TorsoScale, BasisLocalRigDriver.AppliedBodyFit.HasBodyFit),
+        "Body Fit Arm Length" => BasisLocalRigDriver.AppliedBodyFit.HasArmFit
+            ? $"{AvatarArmLength():F4} -> {AvatarArmLength() * BasisLocalRigDriver.AppliedBodyFit.ArmScale:F4} m"
+            : "unchanged",
+        "Body Fit Player Arm Length" => $"{PlayerArmLength():F4} m",
+        "Body Fit Arm Ratio (raw)" => RawArmRatio(),
+        "Hand Device To Wrist L" => HandDeviceToWristGap(BasisBoneTrackedRole.LeftHand),
+        "Hand Device To Wrist R" => HandDeviceToWristGap(BasisBoneTrackedRole.RightHand),
+        "Body Fit Hip Height" => BasisLocalRigDriver.AppliedBodyFit.HasBodyFit
+            ? $"{BasisHeightDriver.AvatarHipHeight:F4} -> {FittedHipHeight():F4} m (target {BasisHeightDriver.PlayerHipHeight * SafeSpaceRatio():F4})"
+            : "unchanged",
+        "Body Fit Head Height Shift" => BasisLocalRigDriver.AppliedBodyFit.HasBodyFit
+            ? $"{HeadHeightShift() * 1000f:F3} mm"
+            : "0.000 mm",
+
         _ => "--"
     };
+
+    private static string Ratio(float numerator, float denominator) =>
+        denominator > 0f && numerator > 0f ? $"{numerator / denominator:F4}" : "--";
+
+    private static float AvatarArmLength() =>
+        Mathf.Max(0f, (BasisHeightDriver.AvatarArmSpan - BasisHeightDriver.AvatarShoulderWidth) * 0.5f);
+
+    private static float SafeSpaceRatio() =>
+        BasisHeightDriver.PlayerEyeHeight > 0f ? BasisHeightDriver.AvatarEyeHeight / BasisHeightDriver.PlayerEyeHeight : 1f;
+
+    /// <summary>
+    /// The player's arm length in avatar space, derived exactly as BasisBodyFitCore.SolveArms does it,
+    /// so this can be read straight against "Avatar Arm Length" — the two numbers are the ratio.
+    /// </summary>
+    private static float PlayerArmLength() =>
+        Mathf.Max(0f, (BasisHeightDriver.PlayerArmSpan * SafeSpaceRatio() - BasisHeightDriver.AvatarShoulderWidth) * 0.5f);
+
+    /// <summary>
+    /// The arm ratio before the max-deviation clamp. When this sits well above 1 while "Body Fit Arm
+    /// Scale" rests on the band edge, the fit wants more than the clamp allows and the measurements
+    /// feeding it are worth doubting before the band is widened.
+    /// </summary>
+    private static string RawArmRatio()
+    {
+        float avatarArm = AvatarArmLength();
+        if (avatarArm <= 0f)
+        {
+            return "--";
+        }
+
+        float raw = PlayerArmLength() / avatarArm;
+        float deviation = BasisSettingsDefaults.FBIKBodyFitMaxDeviation.RawValue;
+        bool clamped = raw > 1f + deviation || raw < 1f - deviation;
+        return $"{raw:F4} ({(raw - 1f):+0.0%;-0.0%;0.0%}){(clamped ? " - clamped" : string.Empty)}";
+    }
+
+    /// <summary>
+    /// Distance between the point the arm-span calibration samples for this hand and the wrist bone the
+    /// arm fit resizes toward. OpenVR bakes the wrist into the device coord before the height calculator
+    /// reads it, so it lands near zero there; OpenXR leaves the device coord on the grip pose, so a
+    /// reading of a few cm is the player arm span over-reading by that much per hand, doubled across the
+    /// span, before it ever reaches the solver.
+    /// </summary>
+    private static string HandDeviceToWristGap(BasisBoneTrackedRole role)
+    {
+        BasisDeviceManagement manager = BasisDeviceManagement.Instance;
+        if (manager == null || !manager.FindDevice(out BasisInput input, role) || input == null)
+        {
+            return "-- (no device)";
+        }
+
+        var mapping = BasisLocalPlayer.Instance?.LocalRigDriver?.basisTransformMapping;
+        Transform wrist = role == BasisBoneTrackedRole.LeftHand ? mapping?.leftHand : mapping?.rightHand;
+        if (wrist == null)
+        {
+            return "-- (no wrist bone)";
+        }
+
+        return $"{Vector3.Distance(input.ScaledDeviceCoord.position, wrist.position):F4} m";
+    }
+
+    private static float FittedHipHeight() =>
+        BasisHeightDriver.AvatarHipHeight + (BasisLocalRigDriver.AppliedBodyFit.LegScale - 1f) * BasisHeightDriver.AvatarLegSpan;
+
+    private static float HeadHeightShift()
+    {
+        var fit = BasisLocalRigDriver.AppliedBodyFit;
+        return (fit.LegScale - 1f) * BasisHeightDriver.AvatarLegSpan
+             + (fit.TorsoScale - 1f) * BasisHeightDriver.AvatarSpineSpan;
+    }
+
+    private static string ScaleMetric(float scale, bool active) =>
+        active ? $"{scale:F4} ({(scale - 1f):+0.0%;-0.0%;0.0%})" : "1.0000 (off)";
+
+    private static string FitReason(Basis.IK.BasisBodyFitStatus status) =>
+        status == Basis.IK.BasisBodyFitStatus.Fitted
+            ? "fitted"
+            : $"not fitted - {Basis.IK.BasisBodyFitCore.Describe(status)}";
+
+    private static string BodyFitStatus()
+    {
+        if (!BasisSettingsDefaults.FBIKBodyFit.RawValue)
+        {
+            return "off";
+        }
+        var fit = BasisLocalRigDriver.AppliedBodyFit;
+        if (!fit.HasArmFit && !fit.HasBodyFit)
+        {
+            return "on, nothing fitted";
+        }
+        if (fit.HasArmFit && fit.HasBodyFit)
+        {
+            return "on, arms + legs + spine fitted";
+        }
+        return fit.HasArmFit ? "on, arms fitted only" : "on, legs + spine fitted only";
+    }
 
     private static void ResetIkDefaults()
     {
         // Main IK / calibration controls
         BasisSettingsDefaults.SitStand.ResetToDefault();
+        BasisSettingsDefaults.TrackerVisuals.ResetToDefault();
         BasisSettingsDefaults.IKMode.ResetToDefault();
         BasisSettingsDefaults.EnableArmToHeightBlend.ResetToDefault();
         BasisSettingsDefaults.ArmToHeightBlend.ResetToDefault();
         BasisSettingsDefaults.IKLockMode.ResetToDefault();
+        BasisSettingsDefaults.CalibrationMirror.ResetToDefault();
         BasisSettingsDefaults.CustomScale.ResetToDefault();
         BasisSettingsDefaults.SelectedScale.ResetToDefault();
 
@@ -1151,6 +1400,18 @@ public static class SettingsProviderIK
         BasisSettingsDefaults.FBIKPositionSmoothingHz.ResetToDefault();
         BasisSettingsDefaults.FBIKRotationSmoothingHz.ResetToDefault();
 
+        for (int Index = 0; Index < BasisSettingsDefaults.FBIKSmoothingGroups.Length; Index++)
+        {
+            BasisSettingsDefaults.SmoothingGroupBindings group = BasisSettingsDefaults.FBIKSmoothingGroups[Index];
+            group.Preset.ResetToDefault();
+            group.Custom.ResetToDefault();
+            group.MinCutoff.ResetToDefault();
+            group.Beta.ResetToDefault();
+            group.Strength.ResetToDefault();
+            group.PositionHz.ResetToDefault();
+            group.RotationHz.ResetToDefault();
+        }
+
         // Bone selection UI state (optional, but usually desired)
         BasisSettingsDefaults.SelectedBone.ResetToDefault();
 
@@ -1165,6 +1426,8 @@ public static class SettingsProviderIK
         BasisSettingsDefaults.DisableAnimationsInFBT.ResetToDefault();
         BasisSettingsDefaults.FBIKProtectElbow.ResetToDefault();
         BasisSettingsDefaults.FBIKCollideTrackedElbow.ResetToDefault();
+        BasisSettingsDefaults.FBIKElbowDrag.ResetToDefault();
+        BasisSettingsDefaults.FBIKElbowDragHz.ResetToDefault();
         BasisSettingsDefaults.FBIKChestRadius.ResetToDefault();
         BasisSettingsDefaults.FBIKCollisionSkin.ResetToDefault();
         BasisSettingsDefaults.FBIKHandRadius.ResetToDefault();
@@ -1179,6 +1442,7 @@ public static class SettingsProviderIK
         BasisSettingsDefaults.FBIKButterflyKneeMaxOpenDeg.ResetToDefault();
         BasisSettingsDefaults.FBIKKneeFollowsFoot.ResetToDefault();
         BasisSettingsDefaults.FBIKKneeFootFollowUpright.ResetToDefault();
+        BasisSettingsDefaults.FBIKNeuralPole.ResetToDefault();
         BasisSettingsDefaults.FBIKSpineBendPitch.ResetToDefault();
         BasisSettingsDefaults.FBIKSpineBendYaw.ResetToDefault();
         BasisSettingsDefaults.FBIKSpineBendRoll.ResetToDefault();
@@ -1188,6 +1452,7 @@ public static class SettingsProviderIK
         BasisSettingsDefaults.FBIKHipHingeStartDeg.ResetToDefault();
         BasisSettingsDefaults.FBIKHipHingeMaxAddDeg.ResetToDefault();
         BasisSettingsDefaults.FBIKMoveBodyBackWhenCrouching.ResetToDefault();
+        BasisSettingsDefaults.FBIKTrunkCounterbalance.ResetToDefault();
         BasisSettingsDefaults.FBIKSwingSmoothRate.ResetToDefault();
         BasisSettingsDefaults.FBIKElbowSwingEnabled.ResetToDefault();
         BasisSettingsDefaults.FBIKChestSpringHz.ResetToDefault();
@@ -1240,6 +1505,10 @@ public static class SettingsProviderIK
         BasisSettingsDefaults.FBIKChestIKTarget.ResetToDefault();
         BasisSettingsDefaults.FBIKLegSwivelSmoothing.ResetToDefault();
         BasisSettingsDefaults.FBIKTrackerBendNormal.ResetToDefault();
+        BasisSettingsDefaults.FBIKSpineProportionMatch.ResetToDefault();
+        BasisSettingsDefaults.FBIKSpineProportionMaxScale.ResetToDefault();
+        BasisSettingsDefaults.FBIKBodyFit.ResetToDefault();
+        BasisSettingsDefaults.FBIKBodyFitMaxDeviation.ResetToDefault();
 
         // Per-bone toggles and calibration sphere scale
         foreach (var b in _bones)
@@ -1387,7 +1656,7 @@ public static class SettingsProviderIK
             }
         }
 
-        _boneEuroEditorGroup.ForceRebuild();
+        RebuildLayout(_boneEuroEditorGroup);
 
         SyncMasterEuroFromChildren();
     }
@@ -1410,6 +1679,97 @@ public static class SettingsProviderIK
         toggle.AssignBinding(binding);
     }
 
+    private static void RebuildLayout(PanelElementDescriptor descriptor)
+    {
+        RectTransform content = descriptor != null ? descriptor.ContentParent : null;
+        if (content != null)
+        {
+            UnityEngine.UI.LayoutRebuilder.ForceRebuildLayoutImmediate(content);
+        }
+    }
+
+    /// <summary>
+    /// Rebuilds outward from a container whose contents just changed height, hitting every ancestor that
+    /// actually carries a layout controller, innermost first, so each outer pass sees the corrected inner
+    /// height. Rows revealed inside a nested group otherwise leave every group above them at its stale
+    /// height and overflow. Stops at the tab page so one reveal does not rebuild the whole menu.
+    /// </summary>
+    private static void RebuildLayoutChain(RectTransform from, PanelElementDescriptor tabDesc)
+    {
+        RectTransform stop = tabDesc != null ? tabDesc.ContentParent : null;
+        RectTransform current = from;
+        while (current != null)
+        {
+            if (current.GetComponent<UnityEngine.UI.ILayoutController>() != null)
+            {
+                UnityEngine.UI.LayoutRebuilder.ForceRebuildLayoutImmediate(current);
+            }
+
+            if (current == stop)
+            {
+                return;
+            }
+
+            current = current.parent as RectTransform;
+        }
+    }
+
+    private static void AddSmoothingGroup(PanelElementDescriptor tabDesc, RectTransform parent, BasisSettingsDefaults.SmoothingGroupBindings group)
+    {
+        string groupName = BasisLocalization.Get(group.NameKey);
+
+        var presetDropdown = PanelDropdown.CreateNewEntry(parent);
+        presetDropdown.Descriptor.SetTitle(groupName);
+        presetDropdown.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.smoothing.preset.tooltip"));
+        presetDropdown.AssignLocalizedEntries(
+            new List<string>(BasisSmoothingProfiles.PresetOrder),
+            new List<string>(BasisSmoothingProfiles.PresetLocalizationKeys));
+        presetDropdown.AssignBinding(group.Preset);
+
+        // Folded into the dropdown above as the "Custom" preset entry.
+        // var customToggle = PanelToggle.CreateNewEntry(parent);
+        // customToggle.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.smoothing.custom"));
+        // customToggle.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.smoothing.custom.tooltip"));
+        // customToggle.AssignBinding(group.Custom);
+
+        // Every group's sliders carry the same five titles, so the group name goes on the row itself —
+        // with two groups tuned by hand the flat list is otherwise ten rows of "Beta" and "Min Cutoff".
+        var sliders = new List<PanelSlider>(5);
+        AddSmoothingGroupSlider(sliders, parent, groupName, "settings.bodyTracking.minCutoff.title", 0.1f, 10f, group.MinCutoff);
+        AddSmoothingGroupSlider(sliders, parent, groupName, "settings.bodyTracking.beta.title", 0f, 10f, group.Beta);
+        AddSmoothingGroupSlider(sliders, parent, groupName, "settings.bodyTracking.smoothingStrength.title", 1f, 100f, group.Strength);
+        AddSmoothingGroupSlider(sliders, parent, groupName, "settings.bodyTracking.posSmoothingHz.title", 0.01f, 60f, group.PositionHz);
+        AddSmoothingGroupSlider(sliders, parent, groupName, "settings.bodyTracking.rotSmoothingHz.title", 0.01f, 60f, group.RotationHz);
+
+        void ApplyCustomVisibility(bool visible)
+        {
+            for (int Index = 0; Index < sliders.Count; Index++)
+            {
+                sliders[Index].Descriptor.SetActive(visible);
+            }
+        }
+
+        ApplyCustomVisibility(BasisSmoothingProfiles.IsCustom(presetDropdown.Value));
+        presetDropdown.OnValueChanged += value =>
+        {
+            ApplyCustomVisibility(BasisSmoothingProfiles.IsCustom(value));
+            RebuildLayoutChain(parent, tabDesc);
+        };
+    }
+
+    private static void AddSmoothingGroupSlider(List<PanelSlider> sliders, RectTransform parent, string groupName, string titleKey, float min, float max, BasisSettingsBinding<float> binding)
+    {
+        string title = $"{groupName}: {BasisLocalization.Get(titleKey)}";
+        var slider = PanelSlider.CreateAndBind(
+            parent,
+            PanelSlider.SliderSettings.Advanced(title, min, max, false, 2, ValueDisplayMode.Raw),
+            binding);
+        if (slider != null)
+        {
+            sliders.Add(slider);
+        }
+    }
+
     private static void CreateCollapsibleSection(PanelElementDescriptor tabDesc, PanelElementDescriptor parentGroup, string title, string description, bool defaultOpen, Action<RectTransform> addContent)
     {
         var parent = parentGroup.ContentParent;
@@ -1427,8 +1787,11 @@ public static class SettingsProviderIK
 
         PanelSectionToggleHelpers.FinalizeCollapsibleGroup(sectionToggle, sectionGroup, defaultOpen, _ =>
         {
-            tabDesc.ForceRebuild();
-            parentGroup.ForceRebuild();
+            // Rebuild the containers that actually carry the VerticalLayoutGroup, innermost first, so the
+            // outer pass sees the corrected inner height. ForceRebuild() on a descriptor root only recurses
+            // when that rect has an ILayoutController, which the tab page and group roots do not.
+            RebuildLayout(parentGroup);
+            RebuildLayout(tabDesc);
         });
     }
 

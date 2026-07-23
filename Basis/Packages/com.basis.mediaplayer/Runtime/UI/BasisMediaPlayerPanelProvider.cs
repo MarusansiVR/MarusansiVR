@@ -35,6 +35,7 @@ namespace Basis.BasisUI.MediaPlayer
         private float _seekPendingPct;
         private bool _drivingSeekSlider;      /* our write, not the user's drag */
         private double _seekAwaitPosS;        /* issued seek target, held until position lands */
+        private double _seekAwaitFromS;       /* pre-seek position, to tell "landed" from "not yet moved" */
         private float _seekAwaitUntil = -1f;
         private const float SeekDebounceSeconds = 0.35f;
         private int _lastPosSec = -1;
@@ -224,7 +225,7 @@ namespace Basis.BasisUI.MediaPlayer
             _urlField = PanelTextField.CreateNewEntry(content);
             _urlField.Descriptor.SetTitle("URL");
 
-            RectTransform actions = BuildActionRow(content);
+            RectTransform actions = PanelElementDescriptor.BuildActionRow(content, "MediaPlayerActions");
 
             PanelButton loadBtn = PanelButton.CreateNew(actions);
             loadBtn.Descriptor.SetTitle("Load URL");
@@ -366,7 +367,7 @@ namespace Basis.BasisUI.MediaPlayer
                 if (_activePlayer != null) _activePlayer.CaptionBackgroundOpacity = Mathf.Clamp01(v / 100f);
             };
 
-            RectTransform actions = BuildActionRow(content);
+            RectTransform actions = PanelElementDescriptor.BuildActionRow(content, "MediaPlayerActions");
             PanelButton resyncBtn = PanelButton.CreateNew(actions);
             resyncBtn.Descriptor.SetTitle("Resync");
             resyncBtn.OnClicked += () =>
@@ -764,16 +765,20 @@ namespace Basis.BasisUI.MediaPlayer
                 _seekPendingAt = -1f;
                 double targetS = Mathf.Clamp(_seekPendingPct, 0f, 100f) / 100.0 * durS;
                 var target = System.TimeSpan.FromSeconds(targetS);
+                // Capture where we're seeking FROM before the seek applies — the
+                // networking path is asynchronous, so the reported position keeps
+                // reading the pre-seek playhead until it lands.
+                double fromS = _activePlayer.Position.TotalSeconds;
                 if (_activeNetworking != null) _ = _activeNetworking.Seek(target);
                 else
                 {
                     try { _activePlayer.Seek(target); }
                     catch (System.NotSupportedException) { }
                 }
-                // The native seek is asynchronous: hold the handle at the target
-                // until the reported position lands nearby (or give up after a
-                // refetch-worth of time), instead of tweening back to the old
-                // playhead and forward again.
+                // Hold the handle at the target until the reported position lands
+                // (or give up after a refetch-worth of time), instead of tweening
+                // back to the old playhead and forward again.
+                _seekAwaitFromS = fromS;
                 _seekAwaitPosS = targetS;
                 _seekAwaitUntil = Time.unscaledTime + 6f;
                 return;
@@ -782,7 +787,12 @@ namespace Basis.BasisUI.MediaPlayer
             double posS = _activePlayer.Position.TotalSeconds;
             if (_seekAwaitUntil > 0f)
             {
-                bool landed = System.Math.Abs(posS - _seekAwaitPosS) < 4.0; /* keyframe granularity */
+                // Landed once the reported position is nearer the target than the
+                // pre-seek playhead. A plain "within N seconds of target" test can't
+                // tell a not-yet-applied seek from a landed one when the jump is
+                // shorter than N, which released the hold early and bounced the bar
+                // back to the old position on small seeks.
+                bool landed = System.Math.Abs(posS - _seekAwaitPosS) <= System.Math.Abs(posS - _seekAwaitFromS);
                 if (!landed && Time.unscaledTime < _seekAwaitUntil)
                 {
                     posS = _seekAwaitPosS;
@@ -967,31 +977,5 @@ namespace Basis.BasisUI.MediaPlayer
             _debugGroup.SetDescription(_debugBuilder.ToString());
         }
 
-        private static RectTransform BuildActionRow(RectTransform parent)
-        {
-            GameObject rowGO = new GameObject("MediaPlayerActions", typeof(RectTransform));
-            RectTransform rowRect = (RectTransform)rowGO.transform;
-            rowRect.SetParent(parent, false);
-
-            rowRect.anchorMin = new Vector2(0f, 1f);
-            rowRect.anchorMax = new Vector2(1f, 1f);
-            rowRect.pivot = new Vector2(0.5f, 1f);
-
-            HorizontalLayoutGroup hlg = rowGO.AddComponent<HorizontalLayoutGroup>();
-            hlg.childForceExpandWidth = true;
-            hlg.childForceExpandHeight = false;
-            hlg.childControlWidth = true;
-            hlg.childControlHeight = true;
-            hlg.spacing = 8f;
-            hlg.padding = new RectOffset(8, 8, 4, 8);
-
-            ContentSizeFitter fitter = rowGO.AddComponent<ContentSizeFitter>();
-            fitter.verticalFit = ContentSizeFitter.FitMode.PreferredSize;
-
-            LayoutElement layout = rowGO.AddComponent<LayoutElement>();
-            layout.flexibleWidth = 1f;
-
-            return rowRect;
-        }
     }
 }

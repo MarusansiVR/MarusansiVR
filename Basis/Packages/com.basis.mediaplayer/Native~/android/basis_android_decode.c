@@ -186,6 +186,17 @@ static int ring_fill_ms(pcm_ring* r) {
     return (int)((int64_t)frames * 1000 / srr);
 }
 
+/* Drop everything buffered — used on a seek so pre-seek chunks can neither gate
+ * the ring (front chunks ahead of the target block the post-seek audio behind
+ * them) nor play out ahead of the post-seek audio. Mirrors PcmRing::flush. */
+static void ring_flush(pcm_ring* r) {
+    pthread_mutex_lock(&r->m);
+    r->head = 0; r->tail = 0;
+    r->chead = 0; r->ccount = 0;
+    r->playedUs = INT64_MIN;
+    pthread_mutex_unlock(&r->m);
+}
+
 /* ---- video frame ring --------------------------------------------------- */
 
 /* Decoded frames are held as acquired AImages (each owning an AHardwareBuffer),
@@ -252,12 +263,31 @@ struct basis_decoder {
     int64_t mediaStartUs;
     int64_t lastPresentedPts; /* PTS of the frame currently shown; INT64_MIN = none */
     int64_t presentedPosUs;   /* stable position for get_position_us; -1 until first present */
+    int  audioSettling;       /* audio-only position: hold get_position at the seek target
+                               * until post-seek audio serves near it (main thread only) */
     int64_t frameIntervalUs;  /* EMA of inter-frame PTS delta (source frame period) */
     int64_t prevWritePts;     /* last frame PTS enqueued (for the interval EMA) */
     int64_t audClockOffsetUs; /* published media-time offset from the monotonic clock; INT64_MIN = not started */
     int bufferUs;             /* jitter buffer: how far behind live we present */
     int bufferMode;           /* 0 = fixed, 1 = dynamic */
     int audioLatencyUs;       /* managed sink's reported output latency; drives the video hold + audio lead */
+
+    /* Seek notification (mirrors basis_win_decode.cpp). basis_decoder_seek bumps
+     * seekGen (+ latches the target) on the caller thread. Each leg keeps its own
+     * last-seen copy and flushes on ITS OWN thread: the audio submit (demux) thread
+     * flushes the PCM ring + AAC codec; the video submit (demux) thread flushes the
+     * video codec + frame ring (it owns vcodec and writes vimg); the render thread
+     * re-anchors the present clock. seekGen/seekTargetUs are cross-thread (atomics). */
+    int     seekGen;          /* atomic */
+    int64_t seekTargetUs;     /* atomic */
+    int64_t seekFromUs;       /* pre-seek audio front, for the audio-only settle (main thread only) */
+    int audioSeekGen;         /* audio-submit (demux) thread only */
+    int videoSeekGen;         /* video-submit (demux) thread only */
+    int renderSeekGen;        /* render thread only */
+    int videoSeekAck;         /* atomic: demux publishes seekGen once it has flushed the
+                               * codec + released pre-seek frames; the render leg holds
+                               * until it matches so it neither anchors to nor deletes a
+                               * post-seek frame the producer has already enqueued */
 
     /* debug counters */
     long dbg_render, dbg_nodue, dbg_acqfail, dbg_drop, dbg_lagms;
@@ -508,6 +538,7 @@ static void feed_extractor_sample(basis_decoder_t* d, AMediaCodec* codec, int tr
     if (ii < 0) return;
     size_t cap = 0;
     uint8_t* buf = AMediaCodec_getInputBuffer(codec, ii, &cap);
+    if (!buf) { AMediaCodec_queueInputBuffer(codec, ii, 0, 0, 0, 0); return; }
     ssize_t sz = AMediaExtractor_readSampleData(d->extractor, buf, cap);
     if (sz < 0) {
         AMediaCodec_queueInputBuffer(codec, ii, 0, 0, 0, AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM);
@@ -858,17 +889,39 @@ int basis_decoder_set_audio_format(basis_decoder_t* d, basis_codec_t codec,
 
 int basis_decoder_submit_video(basis_decoder_t* d, const uint8_t* annexb, int len, int64_t pts_us, int key) {
     (void)key;
-    if (!d || !d->vcodec) return -1;
+    if (!d || !d->vcodec || !annexb || len <= 0) return -1;
+    /* First video AU after a seek: flush the codec and release the pre-seek frames
+     * in the ring so they can't present ahead of the post-seek content. Demux thread
+     * owns vcodec and writes vimg (drain_video_output below), so both are safe here;
+     * the frame release mirrors the shutdown path (AImage_delete under vm). */
+    int svg = __atomic_load_n(&d->seekGen, __ATOMIC_ACQUIRE);
+    if (svg != d->videoSeekGen) {
+        d->videoSeekGen = svg;
+        AMediaCodec_flush(d->vcodec);
+        pthread_mutex_lock(&d->vm);
+        for (int i = 0; i < VRING; ++i) if (d->vimg[i]) { AImage_delete(d->vimg[i]); d->vimg[i] = NULL; }
+        pthread_mutex_unlock(&d->vm);
+        /* Publish the generation so the render leg knows the pre-seek frames are gone
+         * and it can re-anchor. Releasing frames on this (owning) thread only stops
+         * the render leg from deleting post-seek frames drain_video_output re-enqueues. */
+        __atomic_store_n(&d->videoSeekAck, svg, __ATOMIC_RELEASE);
+    }
+    int rc = -1;
     ssize_t ii = AMediaCodec_dequeueInputBuffer(d->vcodec, 2000);
     if (ii >= 0) {
         size_t cap = 0;
-        uint8_t* buf = AMediaCodec_getInputBuffer(d->vcodec, ii, &cap);
-        int n = len < (int)cap ? len : (int)cap;
-        memcpy(buf, annexb, n);
-        AMediaCodec_queueInputBuffer(d->vcodec, ii, 0, n, pts_us, 0);
+        uint8_t* buf = AMediaCodec_getInputBuffer(d->vcodec, ii, &cap); /* size_t: no sign-cast */
+        if (buf && (size_t)len <= cap) {
+            memcpy(buf, annexb, (size_t)len);
+            rc = (AMediaCodec_queueInputBuffer(d->vcodec, ii, 0, (size_t)len, pts_us, 0) == AMEDIA_OK) ? 0 : -1;
+        } else {
+            /* NULL buffer or the AU doesn't fit: never queue a partial frame — it
+             * decodes to corruption. Release the slot empty and report the drop. */
+            AMediaCodec_queueInputBuffer(d->vcodec, ii, 0, 0, pts_us, 0);
+        }
     }
     drain_video_output(d);
-    return 0;
+    return rc;
 }
 
 /* Source-order -> WAVE-order channel map for the Blu-ray HDMV LPCM
@@ -926,15 +979,25 @@ static void submit_lpcm(basis_decoder_t* d, const uint8_t* p, int len, int64_t p
 
 int basis_decoder_submit_audio(basis_decoder_t* d, const uint8_t* data, int len, int64_t pts_us) {
     if (!d || !data || len <= 0) return -1;
+    /* First audio AU after a seek: drop the stale pre-seek ring so this post-seek
+     * audio serves immediately, and flush the AAC codec so it doesn't overlap-add
+     * across the discontinuity. Demux thread, the only thread that touches acodec. */
+    int sg = __atomic_load_n(&d->seekGen, __ATOMIC_ACQUIRE);
+    if (sg != d->audioSeekGen) {
+        d->audioSeekGen = sg;
+        ring_flush(&d->pcm);
+        if (d->acodec) AMediaCodec_flush(d->acodec);
+    }
     if (d->ac == BASIS_CODEC_LPCM) { submit_lpcm(d, data, len, pts_us); return 0; }
     if (!d->acodec) return -1;
+    int rc = -1;
     ssize_t ii = AMediaCodec_dequeueInputBuffer(d->acodec, 2000);
     if (ii >= 0) {
         size_t cap = 0;
         uint8_t* buf = AMediaCodec_getInputBuffer(d->acodec, ii, &cap);
-        if ((size_t)len <= cap) {
+        if (buf && (size_t)len <= cap) {
             memcpy(buf, data, (size_t)len);
-            AMediaCodec_queueInputBuffer(d->acodec, ii, 0, len, pts_us, 0);
+            rc = (AMediaCodec_queueInputBuffer(d->acodec, ii, 0, len, pts_us, 0) == AMEDIA_OK) ? 0 : -1;
         } else {
             /* Never feed a partial frame — it decodes to an error + silence.
              * max-input-size should prevent this; return the buffer empty if not. */
@@ -942,7 +1005,7 @@ int basis_decoder_submit_audio(basis_decoder_t* d, const uint8_t* data, int len,
         }
     }
     drain_audio_output(d);
-    return 0;
+    return rc;
 }
 
 /* ---- render thread + accessors ----------------------------------------- */
@@ -1135,7 +1198,35 @@ static void present_select(basis_decoder_t* d) {
 int basis_decoder_render_update(basis_decoder_t* d) {
     if (!d || !d->vk) return -1;
     if (basis_engine_is_paused(d->engine)) return 0;
-    present_select(d);
+    /* First render after a seek: reset the present clock so present_select re-locks
+     * it to the first post-seek frame instead of staying clamped to the stale decode
+     * edge (a video/clock freeze on a cold forward seek). Render-thread-owned clock;
+     * the frame ring is cleared by the demux thread that owns it (submit_video), and
+     * this leg waits on that clear (videoSeekAck) before selecting a frame. */
+    int rsg = __atomic_load_n(&d->seekGen, __ATOMIC_ACQUIRE);
+    if (rsg != d->renderSeekGen) {
+        d->renderSeekGen = rsg;
+        d->clockStarted = 0;
+        d->primeStartUs = 0;
+        d->lastPresentedPts = INT64_MIN;
+        d->mediaStartUs = 0;
+        /* Only with video: report the target so get_position_us tracks before the
+         * first post-seek frame presents (present_select overwrites it once one does).
+         * Audio-only has no present to advance a pinned value, so leaving it set would
+         * freeze the position at the target — leave it unset and let the audio-front
+         * settle in get_position_us own the position (matches basis_decoder_seek). */
+        if (d->vcodec)
+            __atomic_store_n(&d->presentedPosUs,
+                             __atomic_load_n(&d->seekTargetUs, __ATOMIC_ACQUIRE), __ATOMIC_RELAXED);
+    }
+    /* Hold frame selection until the demux thread has flushed the codec and released
+     * the pre-seek frames. Selecting before then would show a stale frame, and
+     * releasing them here would race the producer and could delete post-seek frames
+     * it has already enqueued (notably when seeking while paused). Keep rendering so
+     * the last frame stays up during the hold. */
+    if (__atomic_load_n(&d->videoSeekAck, __ATOMIC_ACQUIRE) == rsg) {
+        present_select(d);
+    }
     return basis_vk_render_update(d->vk);
 }
 void basis_decoder_render_release(basis_decoder_t* d) { if (d && d->vk) basis_vk_release(d->vk); }
@@ -1162,15 +1253,70 @@ int basis_decoder_get_video_size(basis_decoder_t* d, int* w, int* h) {
 int basis_decoder_get_frame_origin(basis_decoder_t* d) { (void)d; return 0; }
 /* Presentation position once a frame has shown; decode edge before that
  * (start-up, audio-only) so early consumers still see the clock move. */
+void basis_decoder_seek(basis_decoder_t* d, int64_t target_us) {
+    if (!d) return;
+    /* Record the pre-seek audio front before the flush clears it, so the audio-only
+     * settle can tell post-seek audio (near the target) from a stale pre-seek frame
+     * that slipped the drop (near this origin) — see get_position_us. A rapid re-seek
+     * with the ring already empty falls back to the prior target (where we were). */
+    pthread_mutex_lock(&d->pcm.m);
+    int64_t from = d->pcm.playedUs;
+    pthread_mutex_unlock(&d->pcm.m);
+    d->seekFromUs = from != INT64_MIN ? from : __atomic_load_n(&d->seekTargetUs, __ATOMIC_ACQUIRE);
+    /* Drop any pre-seek PCM still queued so the audio callback stops serving it
+     * immediately rather than up to the next audio AU. ring_flush takes the pcm
+     * mutex, safe from this (caller) thread; the codec reset stays on the submit
+     * thread where the decoder is owned. */
+    ring_flush(&d->pcm);
+    /* Latch the target before bumping the generation so any leg that sees the new
+     * generation reads the matching target. */
+    __atomic_store_n(&d->seekTargetUs, target_us, __ATOMIC_RELEASE);
+    if (d->vcodec) {
+        /* Video present: snap the presentation clock to the target so the seek bar
+         * shows the target immediately, before the first post-seek frame presents. */
+        __atomic_store_n(&d->presentedPosUs, target_us, __ATOMIC_RELAXED);
+    } else {
+        /* Audio-only: no frame ever presents, so nothing would advance a pinned
+         * presentedPosUs and get_position_us (which returns it whenever >= 0) would
+         * freeze at the target. Leave it unset so get_position_us reports the audio
+         * front (playedUs), and mark the position settling: the ring was just
+         * flushed, but a pre-seek AU decoded in the window before the demuxer
+         * repositions can still drain a stale chunk into it, which would bounce the
+         * reported position (and the seek bar) to the old spot. get_position_us holds
+         * at the target through the settle until post-seek audio serves near it — the
+         * audio mirror of the video present clock re-anchoring to the target. */
+        __atomic_store_n(&d->presentedPosUs, -1, __ATOMIC_RELAXED);
+        d->audioSettling = 1;
+    }
+    __atomic_add_fetch(&d->seekGen, 1, __ATOMIC_RELEASE);
+}
+
 int64_t basis_decoder_get_position_us(basis_decoder_t* d) {
     if (!d) return -1;
     int64_t presented = __atomic_load_n(&d->presentedPosUs, __ATOMIC_RELAXED);
     if (presented >= 0) return presented;
     if (d->lastPtsUs >= 0) return d->lastPtsUs;
-    /* Audio-only: no video ever presents, so report the audio playback front. */
+    /* Audio-only: no video ever presents, so report the audio playback front.
+     * Through a post-seek settle, hold at the target until served audio lands nearer
+     * the target than the pre-seek origin. The core drops pre-seek audio before the
+     * ring, but that drop is not airtight (a frame can slip the seek-generation
+     * visibility window); latching on the first served sample would then report ~the
+     * pre-seek position. A slipped frame sits near the origin and post-seek audio near
+     * the target, so "nearer target than origin" rejects the former at any seek size —
+     * unlike a fixed proximity window, which a slip within it (a short seek) defeats. */
     pthread_mutex_lock(&d->pcm.m);
     int64_t played = d->pcm.playedUs;
     pthread_mutex_unlock(&d->pcm.m);
+    if (d->audioSettling) {
+        int64_t target = __atomic_load_n(&d->seekTargetUs, __ATOMIC_ACQUIRE);
+        if (played != INT64_MIN) {
+            int64_t from = d->seekFromUs;
+            uint64_t dTarget = played >= target ? (uint64_t)played - (uint64_t)target : (uint64_t)target - (uint64_t)played;
+            uint64_t dFrom   = played >= from   ? (uint64_t)played - (uint64_t)from   : (uint64_t)from   - (uint64_t)played;
+            if (dTarget <= dFrom) { d->audioSettling = 0; return played; }
+        }
+        return target;
+    }
     return played != INT64_MIN ? played : -1;
 }
 int basis_decoder_get_audio_format(basis_decoder_t* d, int* r, int* c) {

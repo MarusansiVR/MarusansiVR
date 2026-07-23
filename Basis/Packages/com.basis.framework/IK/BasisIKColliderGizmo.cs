@@ -1,5 +1,6 @@
+using Basis.Scripts.Common;
 using UnityEngine;
-using UnityEngine.Animations.Rigging;
+using Basis.IK;
 
 namespace Basis.Scripts.Debugging
 {
@@ -34,6 +35,9 @@ namespace Basis.Scripts.Debugging
         private const float SpineRadiusMultiplier = 0.8f;
         private const float HipsRadiusMultiplier = 1.4f;
         private const float UpperArmRadiusMultiplier = 1.2f;
+        // Torso is an ELLIPSE: the radius above is the wide (lateral) half-width; the front-back half-depth
+        // is this fraction of it. Must match BasisElbowProtectCore.k_ChestDepthRatio.
+        private const float ChestDepthRatio = 0.68f;
 
         private static readonly Color TorsoColor = new Color(0f, 1f, 0f, 0.9f);
         private static readonly Color HandColor = new Color(0f, 1f, 1f, 0.9f);
@@ -57,19 +61,18 @@ namespace Basis.Scripts.Debugging
         private static bool _visible;
         private static bool _registered;
 
-        public static void Tick(bool shouldShow, BasisFullBodyIK constraint, bool showLabels, Vector3 cameraPos)
+        public static void Tick(bool shouldShow, BasisTransformMapping bones, in BasisFullIKConstraintJob job, bool showLabels, Vector3 cameraPos)
         {
             EnsureMasterToggleHook();
 
-            if (!shouldShow || constraint == null)
+            if (!shouldShow)
             {
                 SetVisible(false);
                 DestroyLabels();
                 return;
             }
 
-            BasisFullBodyData data = constraint.data;
-            if (data.chest == null || data.neck == null)
+            if (bones.chest == null || bones.neck == null)
             {
                 SetVisible(false);
                 DestroyLabels();
@@ -78,44 +81,71 @@ namespace Basis.Scripts.Debugging
 
             EnsureCreated();
 
-            Vector3 playerUp = data.PlayerUp.sqrMagnitude > 1e-6f ? data.PlayerUp.normalized : Vector3.up;
+            Vector3 playerUp = job.playerUp.sqrMagnitude > 1e-6f ? job.playerUp.normalized : Vector3.up;
 
-            float chestRBase = data.ChestRadius;
-            float skin = data.CollisionSkin;
+            float chestRBase = job.chestRadius;
+            float skin = job.collisionSkin;
             float chestR = Mathf.Max(0f, chestRBase + skin);
             float spineR = Mathf.Max(0f, chestRBase * SpineRadiusMultiplier + skin);
             float hipsR = Mathf.Max(0f, chestRBase * HipsRadiusMultiplier + skin);
 
-            UpdateBoneCapsule(HipsBase, data.hips, data.spine, hipsR, playerUp);
-            UpdateBoneCapsule(SpineBase, data.spine, data.chest, spineR, playerUp);
-            UpdateCapsule(ChestBase, data.chest.position, data.neck.position, chestR, playerUp);
-            SetCapsuleActive(ChestBase, true);
+            // Body-lateral axis (shoulder-to-shoulder), exactly as BasisElbowProtectCore derives it, so the
+            // drawn ellipse matches what the IK actually collides against. Falls back to a round draw if the
+            // upper arms are unavailable.
+            Vector3 bodyRight = (bones.leftUpperArm != null && bones.RightUpperArm != null)
+                ? bones.RightUpperArm.position - bones.leftUpperArm.position : Vector3.zero;
+            Vector3 bodyLat = bodyRight - playerUp * Vector3.Dot(bodyRight, playerUp);
+            Vector3 bodyFwd = Vector3.zero;
+            bool elliptical = bodyLat.sqrMagnitude > 1e-6f;
+            if (elliptical)
+            {
+                bodyLat.Normalize();
+                bodyFwd = Vector3.Cross(bodyLat, playerUp);
+                elliptical = bodyFwd.sqrMagnitude > 1e-6f;
+                if (elliptical) bodyFwd.Normalize();
+            }
 
-            float handR = Mathf.Max(0f, data.HandRadius + data.HandSkin);
+            if (elliptical)
+            {
+                // Each segment tapers to its neighbour's radius, exactly as MinTorsoClearance does.
+                UpdateEllipticalBoneCapsule(HipsBase, bones.Hips, bones.spine, hipsR, spineR, bodyLat, bodyFwd);
+                UpdateEllipticalBoneCapsule(SpineBase, bones.spine, bones.chest, spineR, chestR, bodyLat, bodyFwd);
+                UpdateEllipticalCapsule(ChestBase, bones.chest.position, bones.neck.position, chestR, chestR, bodyLat, bodyFwd);
+                SetCapsuleActive(ChestBase, true);
+            }
+            else
+            {
+                UpdateBoneCapsule(HipsBase, bones.Hips, bones.spine, hipsR, playerUp);
+                UpdateBoneCapsule(SpineBase, bones.spine, bones.chest, spineR, playerUp);
+                UpdateCapsule(ChestBase, bones.chest.position, bones.neck.position, chestR, playerUp);
+                SetCapsuleActive(ChestBase, true);
+            }
 
-            UpdateHandCapsule(LeftHandBase, data.LeftHand, data.leftLowerArm, handR, playerUp, _pointSphereIds[0]);
-            UpdateHandCapsule(RightHandBase, data.RightHand, data.RightLowerArm, handR, playerUp, _pointSphereIds[1]);
+            float handR = Mathf.Max(0f, job.handRadius + job.handSkin);
+
+            UpdateHandCapsule(LeftHandBase, bones.leftHand, bones.leftLowerArm, handR, playerUp, _pointSphereIds[0]);
+            UpdateHandCapsule(RightHandBase, bones.rightHand, bones.RightLowerArm, handR, playerUp, _pointSphereIds[1]);
 
             // Upper-arm capsules (shoulder→elbow) are slightly wider than the
             // hand/forearm capsule; matches the multiplier SolveHand uses for the
             // chest collision check.
             float upperArmR = handR * UpperArmRadiusMultiplier;
-            UpdateBoneCapsule(LeftUpperArmBase, data.leftUpperArm, data.leftLowerArm, upperArmR, playerUp);
-            UpdateBoneCapsule(RightUpperArmBase, data.RightUpperArm, data.RightLowerArm, upperArmR, playerUp);
+            UpdateBoneCapsule(LeftUpperArmBase, bones.leftUpperArm, bones.leftLowerArm, upperArmR, playerUp);
+            UpdateBoneCapsule(RightUpperArmBase, bones.RightUpperArm, bones.RightLowerArm, upperArmR, playerUp);
 
-            UpdateLabels(showLabels, cameraPos, data);
+            UpdateLabels(showLabels, cameraPos, bones, job);
 
             _visible = true;
         }
 
-        private static void UpdateLabels(bool showLabels, Vector3 cameraPos, BasisFullBodyData data)
+        private static void UpdateLabels(bool showLabels, Vector3 cameraPos, BasisTransformMapping bones, in BasisFullIKConstraintJob job)
         {
             // Match the avatar's current height scale so labels grow/shrink with the body
             // (consistent with the skeleton/tracker labels).
             float labelScale = LabelScale * Mathf.Max(0.01f, BasisHeightDriver.ScaledToMatchValue);
             for (int i = 0; i < CapsuleCount; i++)
             {
-                if (showLabels && TryCapsuleMidpoint(data, i, out Vector3 mid))
+                if (showLabels && TryCapsuleMidpoint(bones, job, i, out Vector3 mid))
                 {
                     Color color = LabelColor(i);
                     if (_labelIds[i] <= 0)
@@ -140,18 +170,18 @@ namespace Basis.Scripts.Debugging
             return idx < 5 ? HandColor : UpperArmColor;
         }
 
-        private static bool TryCapsuleMidpoint(BasisFullBodyData data, int idx, out Vector3 mid)
+        private static bool TryCapsuleMidpoint(BasisTransformMapping bones, in BasisFullIKConstraintJob job, int idx, out Vector3 mid)
         {
             Transform a = null, b = null;
             switch (idx)
             {
-                case 0: a = data.hips; b = data.spine; break;
-                case 1: a = data.spine; b = data.chest; break;
-                case 2: a = data.chest; b = data.neck; break;
-                case 3: a = data.LeftHand; b = data.leftLowerArm; break;
-                case 4: a = data.RightHand; b = data.RightLowerArm; break;
-                case 5: a = data.leftUpperArm; b = data.leftLowerArm; break;
-                case 6: a = data.RightUpperArm; b = data.RightLowerArm; break;
+                case 0: a = bones.Hips; b = bones.spine; break;
+                case 1: a = bones.spine; b = bones.chest; break;
+                case 2: a = bones.chest; b = bones.neck; break;
+                case 3: a = bones.leftHand; b = bones.leftLowerArm; break;
+                case 4: a = bones.rightHand; b = bones.RightLowerArm; break;
+                case 5: a = bones.leftUpperArm; b = bones.leftLowerArm; break;
+                case 6: a = bones.RightUpperArm; b = bones.RightLowerArm; break;
             }
             if (a == null || b == null)
             {
@@ -212,6 +242,58 @@ namespace Basis.Scripts.Debugging
             }
             UpdateCapsule(baseIdx, a.position, b.position, radius, playerUp);
             SetCapsuleActive(baseIdx, true);
+        }
+
+        private static void UpdateEllipticalBoneCapsule(int baseIdx, Transform a, Transform b, float latR0, float latR1, Vector3 bodyLat, Vector3 bodyFwd)
+        {
+            if (a == null || b == null)
+            {
+                SetCapsuleActive(baseIdx, false);
+                return;
+            }
+            UpdateEllipticalCapsule(baseIdx, a.position, b.position, latR0, latR1, bodyLat, bodyFwd);
+            SetCapsuleActive(baseIdx, true);
+        }
+
+        // Elliptical cross-section: latR along the body-lateral axis (wide), latR*ChestDepthRatio along
+        // body-forward (thin). Both axes are projected into the plane perpendicular to the segment so the
+        // ring sits square on it.
+        //
+        // TAPERED: latR0 at a, latR1 at b, matching BasisElbowProtectCore.SegmentClearance, which
+        // interpolates each segment's radius to its neighbour's so the torso has no step at a joint.
+        // Drawn straight is what let the old 4 cm cliff at the spine hide in plain sight.
+        private static void UpdateEllipticalCapsule(int baseIdx, Vector3 a, Vector3 b, float latR0, float latR1, Vector3 bodyLat, Vector3 bodyFwd)
+        {
+            Vector3 axis = b - a;
+            float h = axis.magnitude;
+            Vector3 dir = h > 1e-6f ? axis / h : Vector3.up;
+
+            Vector3 u = bodyLat - dir * Vector3.Dot(bodyLat, dir);
+            u = u.sqrMagnitude > 1e-8f ? u.normalized : Vector3.Cross(dir, Vector3.up).normalized;
+            Vector3 w = bodyFwd - dir * Vector3.Dot(bodyFwd, dir);
+            w = w.sqrMagnitude > 1e-8f ? w.normalized : Vector3.Cross(dir, u).normalized;
+
+            float apR0 = latR0 * ChestDepthRatio;
+            float apR1 = latR1 * ChestDepthRatio;
+
+            BasisGizmoManager.UpdateLineGizmo(_lineIds[baseIdx + 0], a + u * latR0, b + u * latR1);
+            BasisGizmoManager.UpdateLineGizmo(_lineIds[baseIdx + 1], a - u * latR0, b - u * latR1);
+            BasisGizmoManager.UpdateLineGizmo(_lineIds[baseIdx + 2], a + w * apR0, b + w * apR1);
+            BasisGizmoManager.UpdateLineGizmo(_lineIds[baseIdx + 3], a - w * apR0, b - w * apR1);
+
+            float step = Mathf.PI * 2f / CapSegments;
+            for (int s = 0; s < CapSegments; s++)
+            {
+                float t = step * s;
+                _capBuffer[s] = a + u * (Mathf.Cos(t) * latR0) + w * (Mathf.Sin(t) * apR0);
+            }
+            BasisGizmoManager.UpdateLineGizmo(_lineIds[baseIdx + CapA_Offset], _capBuffer);
+            for (int s = 0; s < CapSegments; s++)
+            {
+                float t = step * s;
+                _capBuffer[s] = b + u * (Mathf.Cos(t) * latR1) + w * (Mathf.Sin(t) * apR1);
+            }
+            BasisGizmoManager.UpdateLineGizmo(_lineIds[baseIdx + CapB_Offset], _capBuffer);
         }
 
         private static void UpdateCapsule(int baseIdx, Vector3 a, Vector3 b, float radius, Vector3 playerUp)

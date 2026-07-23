@@ -1,4 +1,5 @@
-namespace UnityEngine.Animations.Rigging
+using UnityEngine;
+namespace Basis.IK
 {
     public struct BasisArmSolveInput
     {
@@ -16,7 +17,11 @@ namespace UnityEngine.Animations.Rigging
         public float HintMaxStepDeg;   // max elbow-swivel change this solve; float.MaxValue = unclamped (offline)
         public bool HintIsTracker;     // hint is a REAL elbow tracker (trust it further before the down-stabilizer overrides); false = lookup-derived
         public Quaternion TipRotation; // ANIMATED hand world rotation (pre-IK), like RootRotation/MidRotation. Zero (the default) disables wrist-roll relief.
-        public Quaternion HintRotation; // the tracker's measured lower-arm WORLD rotation (calibrated to the bone). Zero (the default) disables the tracker forearm roll.
+        /// <summary>The lower-arm tracker's measured FOREARM BONE world rotation (its raw rotation already
+        /// mapped through the calibration reference -- BasisLimbRollStore, applied by the rig driver; an elbow
+        /// strap's clock angle is arbitrary and would otherwise land as a constant forearm twist). Zero (the
+        /// struct default) disables the tracker forearm roll.</summary>
+        public Quaternion HintRotation;
     }
 
     public struct BasisArmSolveResult
@@ -239,7 +244,7 @@ namespace UnityEngine.Animations.Rigging
             Quaternion rootDelta = Quaternion.identity;
             if (atCorrectedLen > k_Epsilon)
             {
-                rootDelta = QuaternionExt.FromToRotation(ac, atCorrected);
+                rootDelta = BasisQuaternionExt.FromToRotation(ac, atCorrected);
                 rootRot = rootDelta * rootRot;
                 // Propagate root rotation to its children (mid + tip), pivoting about A.
                 bPosition = aPosition + rootDelta * (bPosition - aPosition);
@@ -371,7 +376,7 @@ namespace UnityEngine.Animations.Rigging
                         // rotation about it cannot move the hand: reach preservation is structural, holds at
                         // every weight, and the promise made in the bend comment above is finally kept.
                         //
-                        // QuaternionExt.FromToRotation(abProj, ahProj) used to build this. It takes its axis
+                        // BasisQuaternionExt.FromToRotation(abProj, ahProj) used to build this. It takes its axis
                         // from Cross(from, to), which DOES lie along acNorm in the general case -- but when the
                         // two go anti-parallel it abandons the plane and returns 180 deg about
                         // Cross(from, Vector3.right), an arbitrary WORLD axis, and swinging the arm about that

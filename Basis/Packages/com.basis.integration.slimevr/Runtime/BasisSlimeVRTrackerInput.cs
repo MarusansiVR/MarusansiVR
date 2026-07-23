@@ -1,4 +1,5 @@
 #if BASIS_FRAMEWORK_EXISTS
+using Basis.Scripts.Device_Management;
 using Basis.Scripts.Device_Management.Devices;
 using Basis.Scripts.TransformBinders.BoneControl;
 using solarxr_protocol.datatypes;
@@ -21,6 +22,7 @@ namespace Basis.Integration.SlimeVR
         {
             BodyPart = bodyPart;
             DeviceSerial = deviceSerial;
+            TrackingHardware = BasisTrackingHardware.Inertial;
             // No forced role: the announced-role scanner binds this by its serial, exactly as for an
             // OpenVR-sourced SlimeVR tracker.
             InitializeTracking(uniqueID, unUniqueID, subSystem, false, BasisBoneTrackedRole.CenterEye);
@@ -28,9 +30,24 @@ namespace Basis.Integration.SlimeVR
 
         public override void RenderPollData()
         {
-            if (!BasisSlimeVRTrackerSource.TryGetTrackerPose(BodyPart, out Vector3 position, out Quaternion rotation))
+            if (!PollPose())
             {
                 return;
+            }
+            UpdateInputEvents();
+            ComputeRaycastDirection(ScaledDeviceCoord.position, ScaledDeviceCoord.rotation, Quaternion.identity);
+        }
+
+        public override void LateDoPollData()
+        {
+            PollPose();
+        }
+
+        private bool PollPose()
+        {
+            if (!BasisSlimeVRTrackerSource.TryGetTrackerPose(BodyPart, out Vector3 position, out Quaternion rotation))
+            {
+                return false;
             }
 
             // The pose already comes back in Basis unscaled playspace (the source anchors it to the HMD's
@@ -40,12 +57,7 @@ namespace Basis.Integration.SlimeVR
             UnscaledDeviceCoord.rotation = rotation;
             ConvertToScaledDeviceCoord();
             ControlOnlyAsDevice();
-            UpdateInputEvents();
-            ComputeRaycastDirection(ScaledDeviceCoord.position, ScaledDeviceCoord.rotation, Quaternion.identity);
-        }
-
-        public override void LateDoPollData()
-        {
+            return true;
         }
 
         public override void ShowTrackedVisual()

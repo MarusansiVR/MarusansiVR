@@ -48,8 +48,8 @@ namespace Basis.BasisUI
                 new BasisMenuPanel.PanelData
                 {
                     Title = this.Title,
-                    PanelSize = new Vector2(600, 1025),
-                    PanelPosition = new Vector3(450, 25, 0),
+                    PanelSize = new Vector2(587, 1025),
+                    PanelPosition = new Vector3(456, 25, 0),
                 },
                 BasisMenuPanel.PanelStyles.Page);
             BoundButton?.BindActiveStateToAddressablesInstance(panel);
@@ -67,26 +67,20 @@ namespace Basis.BasisUI
 
             // See-through calibration mirror (implementation registers from the examples assembly):
             // shows only your avatar + calibration visuals, and unlike the pinned Personal Mirror it
-            // spawns without closing the menu. Off by default; the size buttons only exist while up.
+            // spawns without closing the menu. Off by default.
             if (BasisCalibrationMirrorService.Available)
             {
                 IBasisCalibrationMirror mirror = BasisCalibrationMirrorService.Provider;
+
+                if (BasisSettingsDefaults.CalibrationMirror.RawValue && !mirror.IsUp)
+                {
+                    mirror.Summon();
+                }
 
                 var mirrorToggle = PanelToggle.CreateNewEntry(container);
                 mirrorToggle.Descriptor.SetTitle(BasisLocalization.Get("calibration.mirror"));
                 mirrorToggle.Descriptor.SetTooltip(BasisLocalization.Get("calibration.mirror.tooltip"));
                 mirrorToggle.SetValueWithoutNotify(mirror.IsUp);
-
-                var mirrorLarger = PanelButton.CreateNew(PanelButton.ButtonStyles.Default, container);
-                mirrorLarger.Descriptor.SetTitle(BasisLocalization.Get("calibration.mirror.larger"));
-                mirrorLarger.OnClicked += mirror.ScaleUp;
-
-                var mirrorSmaller = PanelButton.CreateNew(PanelButton.ButtonStyles.Default, container);
-                mirrorSmaller.Descriptor.SetTitle(BasisLocalization.Get("calibration.mirror.smaller"));
-                mirrorSmaller.OnClicked += mirror.ScaleDown;
-
-                mirrorLarger.gameObject.SetActive(mirror.IsUp);
-                mirrorSmaller.gameObject.SetActive(mirror.IsUp);
 
                 mirrorToggle.OnValueChanged += value =>
                 {
@@ -98,11 +92,8 @@ namespace Basis.BasisUI
                     {
                         mirror.Hide();
                     }
-                    bool up = mirror.IsUp;
-                    mirrorToggle.SetValueWithoutNotify(up);
-                    mirrorLarger.gameObject.SetActive(up);
-                    mirrorSmaller.gameObject.SetActive(up);
-                    layout.ForceRebuild();
+                    BasisSettingsDefaults.CalibrationMirror.SetValue(mirror.IsUp);
+                    mirrorToggle.SetValueWithoutNotify(mirror.IsUp);
                 };
             }
 
@@ -223,43 +214,8 @@ namespace Basis.BasisUI
                     layout.ForceRebuild();
                 };
             }
-
-            // Reset Calibration (restores defaults for calibration-only state)
-            var resetButton = PanelButton.CreateNew(PanelButton.ButtonStyles.Default, container);
-            resetButton.Descriptor.SetTitle(BasisLocalization.Get("calibration.reset"));
-            resetButton.Descriptor.SetTooltip(BasisLocalization.Get("calibration.resetDescription"));
-            resetButton.OnClicked += PromptResetCalibration;
         }
 
-        private void PromptResetCalibration()
-        {
-            BasisMainMenu.Instance.OpenDialogue(
-                BasisLocalization.Get("calibration.reset"),
-                BasisLocalization.Get("calibration.resetConfirm"),
-                BasisLocalization.Get("ui.reset"),
-                BasisLocalization.Get("ui.cancel"),
-                value =>
-                {
-                    if (!value)
-                    {
-                        return;
-                    }
-
-                    ResetCalibration();
-                });
-        }
-
-        private void ResetCalibration()
-        {
-            // Forget the persisted body size so the next boot (and this session) starts from a true
-            // uncalibrated state instead of re-seeding the old measurements.
-            BasisSettingsDefaults.SavedPlayerEyeHeight.ResetToDefault();
-            BasisSettingsDefaults.SavedPlayerArmSpan.ResetToDefault();
-            BasisHeightDriver.HasGenuinePlayerEyeHeight = false;
-            BasisHeightDriver.HasUserCalibratedHeight = false;
-            BasisAutoScaleEstimator.Reset();
-            BasisHeightDriver.ApplyScaleAndHeight();
-        }
         private static string FormatScaleMeters(float meters) => meters.ToString("0.##") + " m";
 
         // The dropdown control prefab is sized for the wide settings page; in the slim calibration panel its
@@ -367,8 +323,7 @@ namespace Basis.BasisUI
             _leftPressed = false;
             _rightPressed = false;
 
-            // The cutout mirror is owned by this panel: closing the panel takes it down and
-            // resets its size for the next open.
+            // The cutout mirror is owned by this panel: closing the panel takes it down.
             if (BasisCalibrationMirrorService.Available)
             {
                 BasisCalibrationMirrorService.Provider.Hide();
@@ -382,7 +337,7 @@ namespace Basis.BasisUI
             if (!_calibrated && BasisLocalAvatarDriver.CurrentlyTposing)
             {
                 BasisLocalPlayer.Instance.LocalAvatarDriver.ResetAvatarAnimator();
-                BasisLocalPlayer.Instance.LocalRigDriver.RigLayer.active = true;
+                BasisLocalPlayer.Instance.LocalRigDriver.RigLayerActive = true;
             }
 
             BasisUINeedsVisibleTrackers.Remove(BasisLocalPlayer.Instance);

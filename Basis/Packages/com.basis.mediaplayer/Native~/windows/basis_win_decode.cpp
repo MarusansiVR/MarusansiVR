@@ -198,6 +198,18 @@ struct PcmRing {
         LeaveCriticalSection(&cs);
         return got;
     }
+
+    /* Drop everything buffered. Used on a seek so pre-seek chunks can neither
+     * gate the ring (a backward seek leaves front chunks whose PTS is ahead of
+     * the target, which block the newer post-seek audio queued behind them) nor
+     * play out ahead of the post-seek audio that replaces them. */
+    void flush() {
+        EnterCriticalSection(&cs);
+        head = 0; tail = 0;
+        chead = 0; ccount = 0;
+        playedUs = INT64_MIN;
+        LeaveCriticalSection(&cs);
+    }
 };
 
 /* ---- decoder ------------------------------------------------------------ */
@@ -346,6 +358,28 @@ struct basis_decoder {
      * target forward so samples released now come due exactly when they reach
      * the speaker. */
     volatile LONG audLatencyUs = 60000;
+
+    /* Seek notification. basis_decoder_seek bumps seekGen (+ latches the target)
+     * on the caller thread. Each consumer leg keeps its own last-seen copy and,
+     * when it differs, flushes its stale buffers and re-anchors on ITS OWN thread:
+     * the audio-submit (demux) thread flushes the PCM ring + the MF/Opus decoder;
+     * the video-submit (demux) thread flushes the video MFT (drops its reorder
+     * buffer so retained pre-seek frames can't repopulate the ring) and clears the
+     * frame ring — it owns vdec and writes the ring; the render thread re-anchors
+     * the present clock and also clears the ring so a stale frame can't present in
+     * the window before the next video AU arrives. Nothing is touched across threads. */
+    volatile LONG   seekGen = 0;
+    volatile LONG64 seekTargetUs = 0;
+    int64_t seekFromUs = 0;   /* pre-seek audio front, for the audio-only settle (main thread only) */
+    LONG audioSeekGen = 0;    /* audio-submit (demux) thread only */
+    LONG videoSeekGen = 0;    /* video-submit (demux) thread only */
+    LONG renderSeekGen = 0;   /* render thread only */
+    int  audioSettling = 0;   /* audio-only position: hold get_position at the seek target
+                               * until post-seek audio serves near it (main thread only) */
+    volatile LONG videoSeekAck = 0; /* demux publishes seekGen here once it has flushed
+                                     * vdec + dropped pre-seek frames; the render leg
+                                     * holds until it matches so it neither anchors to a
+                                     * stale frame nor races the producer's ring clear */
 };
 
 /* ---- D3D / MF helpers --------------------------------------------------- */
@@ -568,9 +602,16 @@ static bool configure_video_mft(basis_decoder* d) {
      * Refuse here: only H.265 elementary streams reach this point sizeless (no SPS
      * parser for TS/RTSP/RTMP), and the size can't be recovered once it crashes. */
     if (d->vwidth <= 0 || d->vheight <= 0) {
-        basis_engine_set_error(d->engine,
-            "video track announced no frame size, so the decoder cannot be configured "
-            "(H.265 outside MP4 has no dimension parser yet)");
+        const char* codec_name =
+            d->vcodec == BASIS_CODEC_H265 ? "H.265" :
+            d->vcodec == BASIS_CODEC_H264 ? "H.264" :
+            d->vcodec == BASIS_CODEC_VP9  ? "VP9"   :
+            d->vcodec == BASIS_CODEC_AV1  ? "AV1"   : "this video codec";
+        char msg[176];
+        snprintf(msg, sizeof(msg),
+            "video track (%s) announced no frame size, so the decoder cannot be configured",
+            codec_name);
+        basis_engine_set_error(d->engine, msg);
         SAFE_RELEASE(d->vdec);
         return false;
     }
@@ -842,6 +883,10 @@ static void video_process_to_shared(basis_decoder* d, ID3D11Texture2D* nv12, UIN
     inView->Release();
 }
 
+/* Upper bound on a single decoded output frame — 8K RGB is ~100 MB, so this is
+ * past any real frame while stopping a malformed cbSize from driving a huge alloc. */
+#define BASIS_MAX_OUTPUT_BUFFER (256u * 1024u * 1024u)
+
 /* Pull all currently-available output samples from the video MFT.
  * CRITICAL: in DXVA mode the MFT hands us its own IMFSample in outBuf.pSample,
  * backed by a small pool of D3D11 surfaces. That sample MUST be released every
@@ -857,9 +902,25 @@ static void drain_video(basis_decoder* d) {
         outBuf.dwStreamID = 0;
         if (!providesSamples) {
             IMFSample* s = nullptr; IMFMediaBuffer* mb = nullptr;
-            MFCreateSample(&s);
-            MFCreateMemoryBuffer(si.cbSize ? si.cbSize : (DWORD)(d->vwidth * d->vheight * 3), &mb);
-            s->AddBuffer(mb); mb->Release();
+            DWORD cb = si.cbSize;
+            if (!cb) {
+                /* Dims are attacker-announced; bound each side BEFORE multiplying so
+                 * the product can't overflow (16384 is past any real frame — the SPS
+                 * parser already caps decode dimensions well below this). */
+                if (d->vwidth > 0 && d->vwidth <= 16384 && d->vheight > 0 && d->vheight <= 16384)
+                    cb = (DWORD)((uint64_t)d->vwidth * (uint64_t)d->vheight * 3u);
+                else
+                    cb = 0;
+            }
+            /* Cap both the MFT-declared cbSize and the fallback estimate so a
+             * malformed output size can't exhaust memory. */
+            if (cb == 0 || cb > BASIS_MAX_OUTPUT_BUFFER ||
+                FAILED(MFCreateSample(&s)) || FAILED(MFCreateMemoryBuffer(cb, &mb))) {
+                SAFE_RELEASE(s); SAFE_RELEASE(mb);
+                break;
+            }
+            if (FAILED(s->AddBuffer(mb))) { mb->Release(); s->Release(); break; }
+            mb->Release();
             outBuf.pSample = s;
         }
 
@@ -946,6 +1007,7 @@ static void drain_video(basis_decoder* d) {
  * process share one resolved table. A missing library or symbol degrades to
  * muted audio (the format is rejected), never a crash. */
 #define OPUS_SET_GAIN_REQUEST 4034
+#define OPUS_RESET_STATE 4028
 typedef struct OpusDecoder OpusDecoder;
 typedef struct OpusMSDecoder OpusMSDecoder;
 struct opus_api {
@@ -1395,16 +1457,29 @@ extern "C" int basis_decoder_set_audio_format(basis_decoder_t* d, basis_codec_t 
     return 0;
 }
 
+/* Upper bound on a single compressed access unit — far above any real one (an 8K
+ * HEVC keyframe is a few MB), so a demuxer that ever declared a wild size can't
+ * drive a huge MFCreateMemoryBuffer allocation. */
+#define BASIS_MAX_INPUT_SAMPLE (64 * 1024 * 1024)
+
 static IMFSample* make_input_sample(const uint8_t* data, int len, int64_t pts_us) {
+    /* len/data come from the demuxer (attacker-controlled). Reject a wild size and
+     * return NULL cleanly on a failed allocation rather than dereference a null buffer. */
+    if (!data || len <= 0 || len > BASIS_MAX_INPUT_SAMPLE) return nullptr;
     IMFSample* s = nullptr; IMFMediaBuffer* b = nullptr;
-    MFCreateSample(&s);
-    MFCreateMemoryBuffer(len, &b);
+    if (FAILED(MFCreateSample(&s))) return nullptr;
+    if (FAILED(MFCreateMemoryBuffer((DWORD)len, &b))) { s->Release(); return nullptr; }
     BYTE* p = nullptr; DWORD maxlen = 0;
-    b->Lock(&p, &maxlen, nullptr);
-    memcpy(p, data, len);
-    b->Unlock();
-    b->SetCurrentLength(len);
-    s->AddBuffer(b);
+    HRESULT lhr = b->Lock(&p, &maxlen, nullptr);
+    if (FAILED(lhr) || !p || maxlen < (DWORD)len) {
+        if (SUCCEEDED(lhr)) b->Unlock();   /* locked but unusable: unlock before releasing */
+        b->Release(); s->Release(); return nullptr;
+    }
+    memcpy(p, data, (size_t)len);
+    if (FAILED(b->Unlock()) || FAILED(b->SetCurrentLength((DWORD)len)) ||
+        FAILED(s->AddBuffer(b))) {
+        b->Release(); s->Release(); return nullptr;
+    }
     s->SetSampleTime((LONGLONG)pts_us * 10); /* us -> 100ns */
     b->Release();
     return s;
@@ -1418,12 +1493,31 @@ static IMFSample* make_input_sample(const uint8_t* data, int len, int64_t pts_us
  * this; if that ever changes, serialise submission through a decoder mutex. */
 extern "C" int basis_decoder_submit_video(basis_decoder_t* d, const uint8_t* annexb, int len, int64_t pts_us, int key) {
     (void)key;
-    if (!d || !d->vdec || !annexb || len <= 0) return -1;
+    /* Bound len here, before the AV1 configOBU concatenation below adds to it — so
+     * the total can't overflow int or drive an oversized allocation. */
+    if (!d || !d->vdec || !annexb || len <= 0 || len > BASIS_MAX_INPUT_SAMPLE) return -1;
+    /* First video AU after a seek: flush the MFT so its reorder buffer can't emit
+     * retained pre-seek frames into the ring, and drop the frames already in the
+     * ring. Demux thread owns vdec and writes the ring (drain_video below), so both
+     * are safe here; ring slots are aligned int64, cleared the same lock-free way
+     * they're written. */
+    LONG svg = InterlockedCompareExchange(&d->seekGen, 0, 0);
+    if (svg != d->videoSeekGen) {
+        d->videoSeekGen = svg;
+        d->vdec->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        for (int i = 0; i < basis_decoder::RING; ++i) d->ringPts[i] = INT64_MIN;
+        /* The ring is this (demux) thread's to clear — do it here only, then publish
+         * the generation so the render leg knows the pre-seek frames are gone. That
+         * keeps a single writer of the ring on seek and stops the render leg from
+         * clearing frames this thread may already have repopulated. */
+        InterlockedExchange(&d->videoSeekAck, svg);
+    }
     IMFSample* s;
     bool carried_config = false;
     if (d->vConfigObusLen > 0) {
         /* first AV1 AU: prepend the held configOBUs so the decoder sees the
          * sequence header before any frame data */
+        if (d->vConfigObusLen > BASIS_MAX_INPUT_SAMPLE - len) return -1; /* concat would overflow the cap */
         int total = d->vConfigObusLen + len;
         uint8_t* tmp = (uint8_t*)malloc((size_t)total);
         if (tmp) {
@@ -1438,6 +1532,7 @@ extern "C" int basis_decoder_submit_video(basis_decoder_t* d, const uint8_t* ann
     } else {
         s = make_input_sample(annexb, len, pts_us);
     }
+    if (!s) return -1;   /* sample allocation failed; skip this AU rather than crash */
 
     /* Feed the AU, draining output to make room rather than dropping it. The
      * decoder must accept every frame or playback decimates to the rate at which
@@ -1576,10 +1671,31 @@ static void submit_opus(basis_decoder* d, const uint8_t* data, int len, int64_t 
 
 extern "C" int basis_decoder_submit_audio(basis_decoder_t* d, const uint8_t* data, int len, int64_t pts_us) {
     if (!d || !data || len <= 0) return -1;
+    /* First audio AU after a seek: drop the stale pre-seek ring so this post-seek
+     * audio serves immediately (BUG: multi-second post-seek silence), and flush
+     * the MF decoder so it doesn't overlap-add across the discontinuity. Runs on
+     * the demux thread, which is the only thread that touches `adec`. */
+    LONG sg = InterlockedCompareExchange(&d->seekGen, 0, 0);
+    if (sg != d->audioSeekGen) {
+        d->audioSeekGen = sg;
+        d->pcm.flush();
+        if (d->adec) d->adec->ProcessMessage(MFT_MESSAGE_COMMAND_FLUSH, 0);
+        /* Opus bypasses the MFT; reset its predictive/history state so the first
+         * post-seek packet doesn't decode against the pre-seek timeline. */
+        if (d->opusDec) {
+            if (d->opusIsMS) { if (g_opus.ms_ctl)  g_opus.ms_ctl((OpusMSDecoder*)d->opusDec, OPUS_RESET_STATE); }
+            else             { if (g_opus.dec_ctl) g_opus.dec_ctl((OpusDecoder*)d->opusDec, OPUS_RESET_STATE); }
+        }
+        /* Seed the no-timestamp fallback from this AU so post-seek chunks land on
+         * the target timeline; 0 would put them at the start and the serve gate
+         * would trim or mis-time them. */
+        d->aPtsFallback = pts_us;
+    }
     if (d->acodec == BASIS_CODEC_LPCM) { submit_lpcm(d, data, len, pts_us); return 0; }
     if (d->acodec == BASIS_CODEC_OPUS) { submit_opus(d, data, len, pts_us); return 0; }
     if (!d->adec) return -1;
     IMFSample* s = make_input_sample(data, len, pts_us);
+    if (!s) return -1;   /* sample allocation failed; skip this frame rather than crash */
     HRESULT hr = d->adec->ProcessInput(0, s, 0);
     s->Release();
     if (hr == MF_E_NOTACCEPTING) { drain_audio(d); }
@@ -1632,6 +1748,33 @@ extern "C" int basis_decoder_render_update(basis_decoder_t* d) {
 
     LARGE_INTEGER nowq; QueryPerformanceCounter(&nowq);
     EnterCriticalSection(&d->presentLock);
+
+    /* First render after a seek: re-anchor the present clock to the first post-seek
+     * frame instead of the stale `newest` — without a re-anchor the clock stays
+     * clamped and freezes until a post-seek frame arrives (a ~18s video hang on a
+     * cold forward seek). The ring is cleared by the demux thread that owns it (see
+     * submit_video); this leg only re-anchors, then waits on that clear before
+     * proceeding so it never anchors to a stale frame or races the producer. */
+    {
+        LONG sg = InterlockedCompareExchange(&d->seekGen, 0, 0);
+        if (sg != d->renderSeekGen) {
+            d->renderSeekGen = sg;
+            d->clockStarted = false;
+            d->primeStartQpc = 0;
+            d->lastPresentedPts = INT64_MIN;
+            d->videoBasePts = INT64_MIN;
+            /* Report the target now so get_position_us tracks before the first
+             * post-seek frame presents; render overwrites it once it does. */
+            InterlockedExchange64(&d->presentedPosUs, InterlockedCompareExchange64(&d->seekTargetUs, 0, 0));
+        }
+        /* Hold until the demux thread has flushed vdec and dropped the pre-seek
+         * frames. The prime/anchor path below then re-locks to the first post-seek
+         * frame the producer writes. */
+        if (InterlockedCompareExchange(&d->videoSeekAck, 0, 0) != sg) {
+            LeaveCriticalSection(&d->presentLock);
+            return 0;
+        }
+    }
 
     /* newest available PTS in the ring */
     int64_t newest = INT64_MIN;
@@ -1948,6 +2091,45 @@ extern "C" int basis_decoder_get_video_size(basis_decoder_t* d, int* w, int* h) 
     if (w) *w = d->sharedW; if (h) *h = d->sharedH; return 0;
 }
 extern "C" int basis_decoder_get_frame_origin(basis_decoder_t* d) { return d ? (int)d->frameTopLeft : 0; }
+
+extern "C" void basis_decoder_seek(basis_decoder_t* d, int64_t target_us) {
+    if (!d) return;
+    /* Record the pre-seek audio front before the flush clears it, so the audio-only
+     * settle can tell post-seek audio (near the target) from a stale pre-seek frame
+     * that slipped the drop (near this origin) — see get_position_us. A rapid re-seek
+     * with the ring already empty falls back to the prior target (where we were). */
+    EnterCriticalSection(&d->pcm.cs);
+    int64_t from = d->pcm.playedUs;
+    LeaveCriticalSection(&d->pcm.cs);
+    d->seekFromUs = from != INT64_MIN ? from : InterlockedCompareExchange64(&d->seekTargetUs, 0, 0);
+    /* Drop any pre-seek PCM still queued so the audio callback stops serving it
+     * immediately rather than up to the next audio AU. pcm.flush() is cs-guarded,
+     * safe from this (caller) thread; the codec-state reset stays on the submit
+     * thread where the MFT/Opus decoder is owned. */
+    d->pcm.flush();
+    /* Latch target before bumping the generation so any leg that observes the new
+     * generation reads the matching target. */
+    InterlockedExchange64(&d->seekTargetUs, target_us);
+    if (d->vdec) {
+        /* Video present: snap the presentation clock to the target so the seek bar
+         * shows the target immediately, before the first post-seek frame presents. */
+        InterlockedExchange64(&d->presentedPosUs, target_us);
+    } else {
+        /* Audio-only: no frame ever presents, so nothing would advance a pinned
+         * presentedPosUs and get_position_us (which returns it whenever >= 0) would
+         * freeze at the target. Leave it unset so get_position_us reports the audio
+         * front (playedUs), and mark the position settling: the ring was just
+         * flushed, but a pre-seek AU decoded in the window before the demuxer
+         * repositions can still drain a stale chunk into it, which would bounce the
+         * reported position (and the seek bar) to the old spot. get_position_us
+         * holds at the target through the settle until post-seek audio serves near
+         * it — the audio mirror of the video render leg re-anchoring to the target. */
+        InterlockedExchange64(&d->presentedPosUs, -1);
+        d->audioSettling = 1;
+    }
+    InterlockedIncrement(&d->seekGen);
+}
+
 extern "C" int64_t basis_decoder_get_position_us(basis_decoder_t* d) {
     if (!d) return -1;
     /* Presentation position once a frame has shown; decode-side before that
@@ -1955,10 +2137,27 @@ extern "C" int64_t basis_decoder_get_position_us(basis_decoder_t* d) {
     int64_t presented = InterlockedCompareExchange64((volatile LONG64*)&d->presentedPosUs, 0, 0);
     if (presented >= 0) return presented;
     if (d->lastPtsUs >= 0) return d->lastPtsUs;
-    /* Audio-only: no video ever presents, so report the audio playback front. */
+    /* Audio-only: no video ever presents, so report the audio playback front.
+     * Through a post-seek settle, hold at the target until served audio lands nearer
+     * the target than the pre-seek origin. The core drops pre-seek audio before the
+     * ring, but that drop is not airtight (a frame can slip the seek-generation
+     * visibility window); latching on the first served sample would then report ~the
+     * pre-seek position. A slipped frame sits near the origin and post-seek audio near
+     * the target, so "nearer target than origin" rejects the former at any seek size —
+     * unlike a fixed proximity window, which a slip within it (a short seek) defeats. */
     EnterCriticalSection(&d->pcm.cs);
     int64_t played = d->pcm.playedUs;
     LeaveCriticalSection(&d->pcm.cs);
+    if (d->audioSettling) {
+        int64_t target = InterlockedCompareExchange64((volatile LONG64*)&d->seekTargetUs, 0, 0);
+        if (played != INT64_MIN) {
+            int64_t from = d->seekFromUs;
+            uint64_t dTarget = played >= target ? (uint64_t)played - (uint64_t)target : (uint64_t)target - (uint64_t)played;
+            uint64_t dFrom   = played >= from   ? (uint64_t)played - (uint64_t)from   : (uint64_t)from   - (uint64_t)played;
+            if (dTarget <= dFrom) { d->audioSettling = 0; return played; }
+        }
+        return target;
+    }
     return played != INT64_MIN ? played : -1;
 }
 extern "C" int basis_decoder_get_audio_format(basis_decoder_t* d, int* r, int* c) {

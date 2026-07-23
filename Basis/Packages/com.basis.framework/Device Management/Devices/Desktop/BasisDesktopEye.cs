@@ -5,7 +5,7 @@ using Basis.Scripts.Common;
 using Basis.Scripts.Drivers;
 using Basis.Scripts.TransformBinders.BoneControl;
 using UnityEngine;
-using UnityEngine.Animations.Rigging;
+using Basis.IK;
 namespace Basis.Scripts.Device_Management.Devices.Desktop
 {
     /// <summary>
@@ -104,6 +104,7 @@ namespace Basis.Scripts.Device_Management.Devices.Desktop
 
             ScaledDeviceCoord.rotation = Quaternion.identity;
 
+            TrackingHardware = BasisTrackingHardware.Simulated;
             InitializeTracking(ID, ID, subSystems, true, BasisBoneTrackedRole.CenterEye);
 
             if (BasisHelpers.CheckInstance(Instance))
