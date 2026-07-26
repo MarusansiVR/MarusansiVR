@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading.Tasks;
 using UnityEngine;
 using static BasisNetworkCommon;
+using Basis.Scripts.BasisSdk;
 namespace Basis
 {
     public abstract class BasisNetworkBehaviour : BasisNetworkContentBase
@@ -77,14 +78,47 @@ namespace Basis
         {
             if (BasisNetworkConnection.LocalPlayerIsConnected)
             {
-                bool wassuccesful = TryGetNetworkGUIDIdentifier(out string NetworkGuidID);
+                bool wassuccesful = TryGetIdentifier(out var ContentInformation);
                 if (wassuccesful == false)//this will happen to anything that has not got a GUID from the server
                 {
                     //so if we dont get a GUID from the server lets make one!
                     string FileNamePath = LowLevelGetHierarchyPath(this);
-                    AssignNetworkGUIDIdentifier(FileNamePath);
 
-                    wassuccesful = TryGetNetworkGUIDIdentifier(out NetworkGuidID);
+                    this.transform.GetPositionAndRotation(out Vector3 Position, out Quaternion Rotation);
+                  Vector3 Scale =    this.transform.localScale;
+
+                    byte Type = 0;
+                    if (this.GetType() != typeof(BasisScene))
+                    {
+                        Type = 1;
+                    }
+                    BasisContentInformation Content = new BasisContentInformation
+                    {
+                        LoadedNetID = FileNamePath,
+                        UUIDOfCreator = LocalPlayer.UUID,
+                        IsAdminLocked = false,
+                        LoadStrategy = 0,
+                        PositionX = Position.x,
+                        PositionY = Position.y,
+                        PositionZ = Position.z,
+                        QuaternionW = Rotation.w,
+                        QuaternionX = Rotation.x,
+                        QuaternionY = Rotation.y,
+                        QuaternionZ = Rotation.z,
+                        ModifyScale = true,
+                        ScaleX = Scale.x,
+                        ScaleY = Scale.y,
+                        ScaleZ = Scale.z,
+                        Mode = Type,
+                        Persist = true,
+                        Static = false,
+                        StaticAdminLocked = false,
+
+                    };
+                    //FileNamePath
+                    AssignContentIdentifier(Content);
+
+                    wassuccesful = TryGetIdentifier(out ContentInformation);
                 }
                 if (!wassuccesful)
                 {
@@ -95,8 +129,8 @@ namespace Basis
                 BasisNetworkPlayer.OnOwnershipReleased += LowLevelOwnershipReleased;
                 BasisNetworkPlayer.OnPlayerJoined += LowLevelResolvePendingOwner;
 
-                Task<BasisIdResolutionResult> IDResolverAsync = BasisNetworkIdResolver.ResolveAsync(NetworkGuidID);
-                Task<BasisOwnershipResult> output = BasisNetworkOwnership.RequestCurrentOwnershipAsync(NetworkGuidID);
+                Task<BasisIdResolutionResult> IDResolverAsync = BasisNetworkIdResolver.ResolveAsync(ContentInformation.LoadedNetID);
+                Task<BasisOwnershipResult> output = BasisNetworkOwnership.RequestCurrentOwnershipAsync(ContentInformation.LoadedNetID);
                 Task[] tasks = new Task[] { IDResolverAsync, output };
 
                 await Task.WhenAll(tasks);

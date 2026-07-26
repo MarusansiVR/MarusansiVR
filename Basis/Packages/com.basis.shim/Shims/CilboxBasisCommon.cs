@@ -12,7 +12,9 @@ namespace Cilbox
 			"TMPro.*",
 
 			// Basis types
-			"Basis.Scripts.BasisSdk.Interactions.BasisPickUpUseMode",
+			"BasisNetworkContentBase",
+            "BasisNetworkContentBase+BasisContentInformation",
+            "Basis.Scripts.BasisSdk.Interactions.BasisPickUpUseMode",
 			"Basis.Scripts.Device_Management.Devices.BasisInput", // Restrictive, only used as a type.
 			"Basis.Scripts.BasisSdk.Interactions.BasisPickupInteractable", // Restrictive (See below), only access field.
 			"Basis.Scripts.BasisSdk.Interactions.BasisInteractableObject", // Restrictive (See below), only access field.
@@ -281,7 +283,12 @@ namespace Cilbox
 			"UnityEngine.EventSystems.PointerEventData",
 			"UnityEngine.EventSystems.PointerEventData+InputButton",
 			"UnityEngine.EventSystems.RaycastResult",
-		};
+
+            "BasisNetworkContentBase",
+"BasisNetworkContentBase+BasisContentInformation",
+"Basis.Scripts.BasisSdk.Players.IBasisPlayer",
+"Basis.Scripts.Networking.BasisNetworkConnection",
+        };
 
 		protected static readonly HashSet<string> commonWhiteListFields = new HashSet<string>(){
 			// Unity Vector / Quaternion math fields
@@ -334,7 +341,8 @@ namespace Cilbox
 			"Basis.Scripts.BasisSdk.Interactions.BasisPickupInteractable.OnPickupUse",
 			"Basis.Scripts.BasisSdk.Interactions.BasisInteractableObject.OnInteractStartEvent",
 			"Basis.Scripts.BasisSdk.Interactions.BasisInteractableObject.OnInteractEndEvent",
-			"Basis.BasisNetworkBehaviour.CurrentOwnerId",
+            "BasisNetworkContentBase+BasisContentInformation",
+            "Basis.BasisNetworkBehaviour.CurrentOwnerId",
 			"Basis.BasisNetworkBehaviour.IsOwnedLocallyOnServer",
 			"Basis.BasisNetworkBehaviour.HasNetworkID",
 			"Basis.Scripts.Networking.NetworkedAvatar.BasisNetworkPlayer.playerId",
