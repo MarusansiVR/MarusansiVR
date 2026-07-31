@@ -284,8 +284,6 @@ namespace Basis.Scripts.Avatar
                 // master toggle is off; the toggle path rebuilds when it flips on.
                 BasisLocalPlayer.Instance.LocalBoneDriver.RebuildCalibrationSpheres();
 
-                BasisContinuousCalibration.CaptureBaseline();
-
                 // Re-measure now that classification has assigned the hips role. On the very first
                 // calibration there was no assigned hips tracker to measure earlier, so this is what
                 // activates the leg/spine half -- and it settles here, because the pass above will have
@@ -310,7 +308,7 @@ namespace Basis.Scripts.Avatar
         {
             var rig = BasisLocalPlayer.Instance.LocalRigDriver;
             if (rig == null || !rig.IKDataReady) return;
-            ref BasisFullIKConstraintJob data = ref rig.IKJob;
+            ref BasisEerieMovement data = ref rig.IKJob;
             Common.BasisTransformMapping Mapping = BasisLocalAvatarDriver.Mapping;
 
             LogFbikRole("Head", data.offsetRotationHead, BasisLocalBoneDriver.HeadControl, Mapping.head);
@@ -351,8 +349,7 @@ namespace Basis.Scripts.Avatar
 
         // Scale-free head anchor captured at ritual calibration (unscaled device space). The per-tracker
         // geometry pairing lives on each input (BasisInput.CalibratedUnscaledHead*, captured atomically
-        // with its tracker snapshot); this global copy records "a ritual calibration exists" and is the
-        // standing-height reference for BasisContinuousCalibration's gates.
+        // with its tracker snapshot); this global copy records "a ritual calibration exists".
         public static bool HasCalibrationHeadSnapshot;
         private static Vector3 s_calibHeadUnscaledPos;
         private static Quaternion s_calibHeadUnscaledRot = Quaternion.identity;
@@ -488,7 +485,7 @@ namespace Basis.Scripts.Avatar
             if (!HasCalibrationReference) return;
             var rig = BasisLocalPlayer.Instance != null ? BasisLocalPlayer.Instance.LocalRigDriver : null;
             if (rig == null || !rig.IKDataReady) return;
-            ref BasisFullIKConstraintJob data = ref rig.IKJob;
+            ref BasisEerieMovement data = ref rig.IKJob;
             Common.BasisTransformMapping Mapping = BasisLocalAvatarDriver.Mapping;
             Quaternion rootInv = Mapping.HasAnimatorRoot ? Quaternion.Inverse(Mapping.AnimatorRoot.rotation) : Quaternion.identity;
 
