@@ -115,6 +115,11 @@ public static class BasisNetworkEvents
                     BasisNetworkProfiler.AddToCounter(BasisNetworkProfilerCounter.ServerSideSyncPlayer, Reader.AvailableBytes);
                     ServerReadyMessage srm = new ServerReadyMessage();
                     srm.Deserialize(Reader);
+                    // Mark the player as joining the moment the spawn is KNOWN, not when the
+                    // budgeted queue finally runs it — per-player traffic (voice, avatar
+                    // data) races ahead of creation and consults this to drop quietly.
+                    // CreateRemotePlayer's finally clears it.
+                    BasisNetworkPlayers.JoiningPlayers.TryAdd(srm.playerIdMessage.playerID, 0);
                     BasisNetworkHandleRemoval.LifecycleQueue.Enqueue(() =>
                     {
                         BasisRemotePlayerFactory.CreateRemotePlayer(srm, BasisNetworkManagement.instantiationParameters);
@@ -163,6 +168,7 @@ public static class BasisNetworkEvents
                             BNL.LogError($"Dropping remote-player spawn batch at entry {i}/{batch.Count}: {ex.Message}");
                             break;
                         }
+                        BasisNetworkPlayers.JoiningPlayers.TryAdd(srm.playerIdMessage.playerID, 0);
                         BasisNetworkHandleRemoval.LifecycleQueue.Enqueue(() =>
                         {
                             BasisRemotePlayerFactory.CreateRemotePlayer(srm, BasisNetworkManagement.instantiationParameters);
@@ -531,20 +537,6 @@ public static class BasisNetworkEvents
             }
         });
 
-        BasisClientMessageRegistry.RegisterCore(BasisNetworkCommons.StoreDatabaseChannel, (peer, Reader, channel, deliveryMethod) =>
-        {
-            if (ValidateSize(Reader, peer, channel) == false)
-            {
-                Reader.Recycle();
-                return;
-            }
-            BasisNetworkProfiler.AddToCounter(BasisNetworkProfilerCounter.StoreDatabase, Reader.AvailableBytes);
-            DatabasePrimativeMessage DatabasePrimativeMessage = new DatabasePrimativeMessage();
-            DatabasePrimativeMessage.Deserialize(Reader);
-            Reader.Recycle();
-            BasisNetworkManagement.OnRequestServerSideDatabaseItem?.Invoke(DatabasePrimativeMessage);
-        });
-
         BasisClientMessageRegistry.RegisterCore(BasisNetworkCommons.ServerStatisticsChannel, (peer, Reader, channel, deliveryMethod) =>
         {
             if (ValidateSize(Reader, peer, channel) == false)
@@ -741,9 +733,14 @@ public static class BasisNetworkEvents
             Snapshotdata?.Invoke(Snapshot);
         });
     }
+    // Reused across both stat-frame calls: RequestStatFrames fires on a 0.1s timer while the
+    // stats view is open, so a fresh writer per call was garbage every tick for one bool.
+    private static readonly NetDataWriter StatFrameWriter = new NetDataWriter();
+
     public static void RequestStatFrames()
     {
-        NetDataWriter Writer = new NetDataWriter();
+        NetDataWriter Writer = StatFrameWriter;
+        Writer.Reset();
         Writer.Put(true);
         BasisNetworkConnection.LocalPlayerPeer.Send(Writer, BasisNetworkCommons.ServerStatisticsChannel, Basis.Network.Core.DeliveryMethod.ReliableOrdered);
         BasisNetworkProfiler.AddToCounter(BasisNetworkProfilerCounter.ServerAvatarData, Writer.Length);
@@ -752,7 +749,8 @@ public static class BasisNetworkEvents
 
     public static void StopStatFrames()
     {
-        NetDataWriter Writer = new NetDataWriter();
+        NetDataWriter Writer = StatFrameWriter;
+        Writer.Reset();
         Writer.Put(false);
         BasisNetworkConnection.LocalPlayerPeer?.Send(Writer, BasisNetworkCommons.ServerStatisticsChannel, Basis.Network.Core.DeliveryMethod.ReliableOrdered);
         BasisNetworkProfiler.AddToCounter(BasisNetworkProfilerCounter.ServerAvatarData, Writer.Length);
@@ -913,7 +911,7 @@ public static class BasisNetworkEvents
                     BasisMainMenu.Open();
                     if (BasisMainMenu.Instance != null)
                     {
-                        BasisMainMenu.Instance.OpenDialogue("Server Connection", reason, "ok", value =>
+                        BasisMainMenu.Instance.OpenDialogue(BasisLocalization.Get("menu.servers.connection.title"), reason, BasisLocalization.Get("ui.ok"), value =>
                         {
                         });
                     }
@@ -934,7 +932,7 @@ public static class BasisNetworkEvents
                 BasisMainMenu.Open();
                 if (BasisMainMenu.Instance != null)
                 {
-                    BasisMainMenu.Instance.OpenDialogue("Server Connection", Reason, "ok", value =>
+                    BasisMainMenu.Instance.OpenDialogue(BasisLocalization.Get("menu.servers.connection.title"), Reason, BasisLocalization.Get("ui.ok"), value =>
                     {
                     });
                 }

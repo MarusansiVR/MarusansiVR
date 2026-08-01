@@ -1,7 +1,9 @@
 using Basis.Network.Core;
 using Basis.Network.Server.Auth;
 using BasisNetworkCore.Security;
+using BasisNetworkServer.BasisNetworking;
 using BasisNetworkServer.Security;
+using BasisPermissions;
 using System.Net;
 using Xunit;
 using static BasisNetworkCore.Serializable.SerializableBasis;
@@ -495,6 +497,11 @@ public class BasisGlobalLockManagerTests
         CilboxLocked = false,
         ImagesLocked = false,
         EndEffectorIKDisabled = false,
+        TextChatLocked = false,
+        VoiceChatLocked = false,
+        MediaPlayerLocked = false,
+        CameraCaptureLocked = false,
+        PropGrabbingLocked = false,
     };
 
     private static Configuration AllLocked() => new()
@@ -511,6 +518,11 @@ public class BasisGlobalLockManagerTests
         CilboxLocked = true,
         ImagesLocked = true,
         EndEffectorIKDisabled = true,
+        TextChatLocked = true,
+        VoiceChatLocked = true,
+        MediaPlayerLocked = true,
+        CameraCaptureLocked = true,
+        PropGrabbingLocked = true,
     };
 
     private static void AssertAllFlags(bool expected)
@@ -526,6 +538,11 @@ public class BasisGlobalLockManagerTests
         Assert.Equal(expected, BasisGlobalLockManager.CilboxLocked);
         Assert.Equal(expected, BasisGlobalLockManager.ImagesLocked);
         Assert.Equal(expected, BasisGlobalLockManager.EndEffectorIKDisabled);
+        Assert.Equal(expected, BasisGlobalLockManager.TextChatLocked);
+        Assert.Equal(expected, BasisGlobalLockManager.VoiceChatLocked);
+        Assert.Equal(expected, BasisGlobalLockManager.MediaPlayerLocked);
+        Assert.Equal(expected, BasisGlobalLockManager.CameraCaptureLocked);
+        Assert.Equal(expected, BasisGlobalLockManager.PropGrabbingLocked);
     }
 
     [Fact]
@@ -562,6 +579,11 @@ public class BasisGlobalLockManagerTests
             Assert.False(BasisGlobalLockManager.CilboxLocked);
             Assert.False(BasisGlobalLockManager.ImagesLocked);
             Assert.False(BasisGlobalLockManager.EndEffectorIKDisabled);
+            Assert.False(BasisGlobalLockManager.TextChatLocked);
+            Assert.False(BasisGlobalLockManager.VoiceChatLocked);
+            Assert.False(BasisGlobalLockManager.MediaPlayerLocked);
+            Assert.False(BasisGlobalLockManager.CameraCaptureLocked);
+            Assert.False(BasisGlobalLockManager.PropGrabbingLocked);
             Assert.Equal(0, BasisGlobalLockManager.CameraMetadataDisallowMask);
         }
         finally
@@ -587,6 +609,11 @@ public class BasisGlobalLockManagerTests
             (BasisGlobalLockManager.ToggleCilbox, () => BasisGlobalLockManager.CilboxLocked),
             (BasisGlobalLockManager.ToggleImages, () => BasisGlobalLockManager.ImagesLocked),
             (BasisGlobalLockManager.ToggleEndEffectorIK, () => BasisGlobalLockManager.EndEffectorIKDisabled),
+            (BasisGlobalLockManager.ToggleTextChat, () => BasisGlobalLockManager.TextChatLocked),
+            (BasisGlobalLockManager.ToggleVoiceChat, () => BasisGlobalLockManager.VoiceChatLocked),
+            (BasisGlobalLockManager.ToggleMediaPlayer, () => BasisGlobalLockManager.MediaPlayerLocked),
+            (BasisGlobalLockManager.ToggleCameraCapture, () => BasisGlobalLockManager.CameraCaptureLocked),
+            (BasisGlobalLockManager.TogglePropGrabbing, () => BasisGlobalLockManager.PropGrabbingLocked),
         };
 
         foreach ((Func<bool> toggle, Func<bool> state) in toggles)
@@ -658,6 +685,11 @@ public class BasisGlobalLockManagerTests
                 CilboxLocked = true,
                 ImagesLocked = false,
                 EndEffectorIKDisabled = true,
+                TextChatLocked = true,
+                VoiceChatLocked = false,
+                MediaPlayerLocked = true,
+                CameraCaptureLocked = false,
+                PropGrabbingLocked = true,
             });
 
             var peer = new SecurityTestPeer(1);
@@ -676,6 +708,8 @@ public class BasisGlobalLockManagerTests
                 1, 0,                                     // playspace mover, direct connect
                 1, 0,                                     // cilbox, images
                 1,                                        // end-effector IK disabled
+                1,                                        // text chat locked
+                0, 1, 0, 1,                               // voice, media player, camera capture, prop grabbing
             }, payload);
 
             BasisGlobalLockManager.BroadcastLockState(); // zero connected peers: must be a safe no-op
@@ -686,33 +720,90 @@ public class BasisGlobalLockManagerTests
             BasisGlobalLockManager.InitializeFromConfig(AllUnlocked());
         }
     }
+
+    /// <summary>
+    /// The text-chat lock is enforced server-side, so the gate itself is the security boundary —
+    /// it must block only while the lock is on, and must let basis.chat.lockbypass holders through.
+    /// Uses the UUID overload deliberately: the NetPeer form mutates the shared
+    /// NetworkServer.AuthIdentity, which perturbs the connection-lifecycle suite.
+    /// </summary>
+    [Fact]
+    public void IsChatBlockedForUuid_BlocksOnlyLockedUsersWithoutTheBypassNode()
+    {
+        PermissionManager manager = PermissionManager.PermissionIntegration.Manager;
+        string plainUuid = $"chat-plain-{Guid.NewGuid():N}";
+        string bypassUuid = $"chat-bypass-{Guid.NewGuid():N}";
+
+        try
+        {
+            manager.AddUserNode(bypassUuid, PermNodes.ChatLockBypass);
+
+            BasisGlobalLockManager.InitializeFromConfig(AllUnlocked());
+            Assert.False(BasisNetworkChat.IsChatBlockedForUuid(plainUuid));
+            Assert.False(BasisNetworkChat.IsChatBlockedForUuid(bypassUuid));
+
+            Assert.True(BasisGlobalLockManager.ToggleTextChat());
+            Assert.True(BasisNetworkChat.IsChatBlockedForUuid(plainUuid));
+            Assert.False(BasisNetworkChat.IsChatBlockedForUuid(bypassUuid));
+        }
+        finally
+        {
+            manager.RemoveUserNode(bypassUuid, PermNodes.ChatLockBypass);
+            BasisGlobalLockManager.InitializeFromConfig(AllUnlocked());
+        }
+    }
+
+    /// <summary>
+    /// Voice is the other server-enforced lock, and it gates BOTH the normal and shout paths —
+    /// a shout-mode user must not keep broadcasting through a voice lock they can't bypass.
+    /// </summary>
+    [Fact]
+    public void IsVoiceBlockedForUuid_BlocksOnlyLockedUsersWithoutTheBypassNode()
+    {
+        PermissionManager manager = PermissionManager.PermissionIntegration.Manager;
+        string plainUuid = $"voice-plain-{Guid.NewGuid():N}";
+        string bypassUuid = $"voice-bypass-{Guid.NewGuid():N}";
+
+        try
+        {
+            manager.AddUserNode(bypassUuid, PermNodes.VoiceLockBypass);
+
+            BasisGlobalLockManager.InitializeFromConfig(AllUnlocked());
+            Assert.False(BasisServerHandle.BasisServerHandleEvents.IsVoiceBlockedForUuid(plainUuid));
+            Assert.False(BasisServerHandle.BasisServerHandleEvents.IsVoiceBlockedForUuid(bypassUuid));
+
+            Assert.True(BasisGlobalLockManager.ToggleVoiceChat());
+            Assert.True(BasisServerHandle.BasisServerHandleEvents.IsVoiceBlockedForUuid(plainUuid));
+            Assert.False(BasisServerHandle.BasisServerHandleEvents.IsVoiceBlockedForUuid(bypassUuid));
+        }
+        finally
+        {
+            manager.RemoveUserNode(bypassUuid, PermNodes.VoiceLockBypass);
+            BasisGlobalLockManager.InitializeFromConfig(AllUnlocked());
+        }
+    }
 }
 
 /// <summary>
-/// Persistent-database / content-share DoS caps: sanitization to defaults and
-/// absolute maxima, change reporting, and the GlobalGetResourceLimits payload.
+/// Content-share DoS caps: sanitization to defaults and absolute maxima,
+/// change reporting, and the GlobalGetResourceLimits payload.
 /// </summary>
 public class BasisResourceLimitManagerTests
 {
-    private static void RestoreDefaults() => BasisResourceLimitManager.SetLimits(10000, 256, 1000, 32);
+    private static void RestoreDefaults() => BasisResourceLimitManager.SetLimits(32);
 
     [Theory]
-    [InlineData(5, 10, 20, 40, 5, 10, 20, 40)]
-    [InlineData(1, 1, 1, 1, 1, 1, 1, 1)]
-    [InlineData(0, 0, 0, 0, 10000, 256, 1000, 32)]
-    [InlineData(-7, -7, -7, -7, 10000, 256, 1000, 32)]
-    [InlineData(1000000, 8192, 100000, 4096, 1000000, 8192, 100000, 4096)]
-    [InlineData(int.MaxValue, int.MaxValue, int.MaxValue, int.MaxValue, 1000000, 8192, 100000, 4096)]
-    public void SetLimits_SanitizesEachCap(
-        int entries, int nameLength, int payloadEntries, int spheres,
-        int expectedEntries, int expectedNameLength, int expectedPayloadEntries, int expectedSpheres)
+    [InlineData(40, 40)]
+    [InlineData(1, 1)]
+    [InlineData(0, 32)]
+    [InlineData(-7, 32)]
+    [InlineData(4096, 4096)]
+    [InlineData(int.MaxValue, 4096)]
+    public void SetLimits_SanitizesTheCap(int spheres, int expectedSpheres)
     {
         try
         {
-            BasisResourceLimitManager.SetLimits(entries, nameLength, payloadEntries, spheres);
-            Assert.Equal(expectedEntries, BasisResourceLimitManager.MaxDatabaseEntries);
-            Assert.Equal(expectedNameLength, BasisResourceLimitManager.MaxDatabaseNameLength);
-            Assert.Equal(expectedPayloadEntries, BasisResourceLimitManager.MaxDatabasePayloadEntries);
+            BasisResourceLimitManager.SetLimits(spheres);
             Assert.Equal(expectedSpheres, BasisResourceLimitManager.MaxContentSpheresPerPlayer);
         }
         finally
@@ -725,11 +816,11 @@ public class BasisResourceLimitManagerTests
     public void SetLimits_ReportsWhetherAnythingActuallyChanged()
     {
         RestoreDefaults();
-        Assert.False(BasisResourceLimitManager.SetLimits(10000, 256, 1000, 32));
-        Assert.False(BasisResourceLimitManager.SetLimits(0, -1, 0, -1)); // sanitized straight back to the defaults
-        Assert.True(BasisResourceLimitManager.SetLimits(10000, 256, 1000, 33));
-        Assert.True(BasisResourceLimitManager.SetLimits(10000, 256, 1000, 32));
-        Assert.False(BasisResourceLimitManager.SetLimits(10000, 256, 1000, 32));
+        Assert.False(BasisResourceLimitManager.SetLimits(32));
+        Assert.False(BasisResourceLimitManager.SetLimits(-1)); // sanitized straight back to the default
+        Assert.True(BasisResourceLimitManager.SetLimits(33));
+        Assert.True(BasisResourceLimitManager.SetLimits(32));
+        Assert.False(BasisResourceLimitManager.SetLimits(32));
     }
 
     [Fact]
@@ -739,14 +830,8 @@ public class BasisResourceLimitManagerTests
         {
             BasisResourceLimitManager.InitializeFromConfig(new Configuration
             {
-                MaxDatabaseEntries = 12345,
-                MaxDatabaseNameLength = 512,
-                MaxDatabasePayloadEntries = 2048,
                 MaxContentSpheresPerPlayer = 64,
             });
-            Assert.Equal(12345, BasisResourceLimitManager.MaxDatabaseEntries);
-            Assert.Equal(512, BasisResourceLimitManager.MaxDatabaseNameLength);
-            Assert.Equal(2048, BasisResourceLimitManager.MaxDatabasePayloadEntries);
             Assert.Equal(64, BasisResourceLimitManager.MaxContentSpheresPerPlayer);
         }
         finally
@@ -756,19 +841,16 @@ public class BasisResourceLimitManagerTests
     }
 
     [Fact]
-    public void SendStateToPeer_WritesModeByteThenFourInts()
+    public void SendStateToPeer_WritesModeByteThenTheCap()
     {
         try
         {
-            BasisResourceLimitManager.SetLimits(11111, 300, 2222, 44);
+            BasisResourceLimitManager.SetLimits(44);
             var peer = new SecurityTestPeer(2);
             BasisResourceLimitManager.SendStateToPeer(peer);
 
             var reader = new NetDataReader(Assert.Single(peer.Sent));
             Assert.Equal((byte)AdminRequestMode.GlobalGetResourceLimits, reader.GetByte());
-            Assert.Equal(11111, reader.GetInt());
-            Assert.Equal(300, reader.GetInt());
-            Assert.Equal(2222, reader.GetInt());
             Assert.Equal(44, reader.GetInt());
             Assert.Equal(0, reader.AvailableBytes);
             Assert.Equal(BasisNetworkCommons.AdminChannel, peer.LastChannel);

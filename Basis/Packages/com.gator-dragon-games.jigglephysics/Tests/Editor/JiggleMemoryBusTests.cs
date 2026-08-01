@@ -54,14 +54,24 @@ internal unsafe class JiggleMemoryBusTests {
     }
 
     /// <summary>
-    /// Drives CommitTrees until it has certainly drained. The commit deliberately does a bounded
-    /// slice of work per call, so callers that care about how many frames it takes count the calls
-    /// themselves instead of using this.
+    /// Drives CommitTrees until it has certainly drained. The common case lands in one call, but the
+    /// rebuild fallback does a bounded slice of work per call, so callers that care about how many
+    /// frames it takes count the calls themselves instead of using this.
     /// </summary>
     private void PumpTrees(int calls = 64) {
         for (int i = 0; i < calls; i++) {
             bus.CommitTrees();
         }
+    }
+
+    /// <summary>
+    /// Forces the next tree commit down the sliced-rebuild path. Flipping the front access array out
+    /// from under the list produces the same shape of desync a bone destroyed out of band causes —
+    /// Unity drops it and the array stops mirroring the list — which is the only thing that
+    /// disqualifies the in-place commit.
+    /// </summary>
+    private void DesyncTreeAccessArrays() {
+        bus.doubleBufferTransformAccessArray.Flip();
     }
 
     private void PumpColliders(int calls = 8) {
@@ -92,15 +102,81 @@ internal unsafe class JiggleMemoryBusTests {
     // ---------------------------------------------------------------- adding
 
     [Test]
-    public void ScheduledAdd_IsNotVisibleUntilTheCommitCompletes() {
+    public void ScheduledAdd_IsNotVisibleUntilTheCommitRuns() {
         var tree = NewTree();
         bus.ScheduleAdd(tree);
 
         Assert.AreEqual(0, bus.treeCount, "queued but not committed");
         bus.CommitTrees();
-        Assert.AreEqual(0, bus.treeCount, "first commit only reserves the slice");
+        Assert.AreEqual(1, bus.treeCount, "an in-place commit lands the whole add in one call");
+    }
+
+    /// <summary>
+    /// The steady-state path. Access array slots are index-stable, so a commit only has to write the
+    /// slots the change touched — it does not rebuild the whole transform list across several
+    /// frames, which is what made a commit cost O(every jiggle transform) per structural change.
+    /// </summary>
+    [Test]
+    public void CommitTrees_WithTheAccessArraysMirrored_LandsInOneCallWhateverTheBatchSize() {
+        JiggleMemoryBus.SetTransformAccessBatchSize(1);
+        var first = NewTree();
+        bus.ScheduleAdd(first);
         bus.CommitTrees();
-        Assert.AreEqual(1, bus.treeCount);
+        Assert.AreEqual(1, bus.treeCount, "the first ever commit starts mirrored (both empty)");
+
+        var second = NewTree();
+        bus.ScheduleAdd(second);
+        bus.CommitTrees();
+
+        Assert.AreEqual(2, bus.treeCount, "a one-per-frame slice budget cannot slow down an in-place commit");
+        Assert.AreEqual(10, bus.transformCount);
+    }
+
+    /// <summary>
+    /// An in-place commit writes the access arrays itself instead of regenerating them from the
+    /// lists, so what matters is that it writes what a rebuild would have: every bone registered at
+    /// the slot it was allocated, and the root array holding that tree's root bone across the slice.
+    /// A drift here misaligns the parallel native buffers, which is the class of bug that reads
+    /// another rig's pose.
+    /// </summary>
+    [Test]
+    public void CommitTrees_InPlace_RegistersEveryBoneAtItsAllocatedSlot() {
+        var tree = NewTree();
+        bus.ScheduleAdd(tree);
+        bus.CommitTrees();
+
+        var offset = (int)Committed(tree.rootID).transformIndexOffset;
+        var access = bus.GetTransformAccessArray();
+        var rootAccess = bus.GetTransformRootAccessArray();
+
+        Assert.AreEqual(bus.transformCount, access.length, "the access array must mirror the list it was written from");
+        Assert.AreEqual(bus.transformCount, rootAccess.length);
+        for (int i = 0; i < tree.bones.Length; i++) {
+            Assert.AreSame(tree.bones[i], access[offset + i], $"slot {i}");
+            Assert.AreSame(tree.bones[0], rootAccess[offset + i], $"root slot {i}");
+        }
+    }
+
+    /// <summary>
+    /// The other half: a removed slice has to stop pointing at the departed rig's bones in the same
+    /// commit, or the read jobs keep sampling an avatar that logically left.
+    /// </summary>
+    [Test]
+    public void CommitTrees_InPlace_ParksDummiesInARemovedTreesSlots() {
+        var tree = NewTree();
+        bus.ScheduleAdd(tree);
+        bus.CommitTrees();
+        var offset = (int)Committed(tree.rootID).transformIndexOffset;
+
+        bus.ScheduleRemove(tree);
+        bus.CommitTrees();
+
+        var access = bus.GetTransformAccessArray();
+        var rootAccess = bus.GetTransformRootAccessArray();
+        for (int i = 0; i < 5; i++) {
+            Assert.AreSame(JiggleMemoryBus.GetDummyTransform(offset + i), access[offset + i], $"slot {i}");
+            Assert.AreSame(JiggleMemoryBus.GetDummyTransform(offset + i), rootAccess[offset + i], $"root slot {i}");
+        }
     }
 
     [Test]
@@ -295,6 +371,62 @@ internal unsafe class JiggleMemoryBusTests {
         Assert.AreEqual(offsetC, Committed(c.rootID).transformIndexOffset);
     }
 
+    /// <summary>
+    /// A rig can be queued for removal twice inside one commit window: the segment dirties itself
+    /// (which schedules a remove) and then its bones die before the commit runs, so the dead-segment
+    /// prune schedules another. rootIDToTreeIndex still resolves the tree for both, so the slice
+    /// would be freed twice and then handed to two different trees at once.
+    /// </summary>
+    [Test]
+    public void RemoveScheduledTwiceBeforeTheCommit_FreesTheSliceOnce() {
+        var tree = NewTree(3, "a");
+        bus.ScheduleAdd(tree);
+        PumpTrees();
+
+        bus.ScheduleRemove(tree);
+        bus.ScheduleRemove(tree);
+        PumpTrees();
+
+        Assert.AreEqual(0, bus.treeCount);
+
+        var first = NewTree(3, "b");
+        var second = NewTree(3, "c");
+        bus.ScheduleAdd(first);
+        bus.ScheduleAdd(second);
+        PumpTrees();
+
+        var firstStart = Committed(first.rootID).transformIndexOffset;
+        var firstEnd = firstStart + Committed(first.rootID).pointCount;
+        var secondStart = Committed(second.rootID).transformIndexOffset;
+        var secondEnd = secondStart + Committed(second.rootID).pointCount;
+        Assert.IsTrue(firstEnd <= secondStart || secondEnd <= firstStart,
+            $"slices overlap: [{firstStart},{firstEnd}) and [{secondStart},{secondEnd})");
+    }
+
+    /// <summary>
+    /// A bone destroyed while still enrolled makes Unity drop it from the access array and shift
+    /// every later slot, while the pose buffers keep the old slot indexing — so jiggle would pose
+    /// one avatar's bones from another's tree. The consumer refuses to schedule while that is true,
+    /// which makes reaching the rebuild mandatory: it used to be reachable only through a pending
+    /// command, so a bone dying with no structural change behind it would have left jiggle off for
+    /// the rest of the session.
+    /// </summary>
+    [Test]
+    public void AccessArraysDesyncedWithNothingQueued_StillRealign() {
+        var tree = NewTree();
+        bus.ScheduleAdd(tree);
+        PumpTrees();
+        Assert.IsFalse(bus.GetAccessArraysDesynced(), "a settled commit leaves the arrays mirrored");
+
+        DesyncTreeAccessArrays();
+        Assert.IsTrue(bus.GetAccessArraysDesynced(), "front array no longer matches the list");
+
+        PumpTrees();
+
+        Assert.IsFalse(bus.GetAccessArraysDesynced(), "the rebuild must not depend on a queued command");
+        Assert.IsTrue(IsCommitted(tree.rootID), "realigning must not drop the live tree");
+    }
+
     // ------------------------------------------------------------- rejection
 
     [Test]
@@ -440,11 +572,21 @@ internal unsafe class JiggleMemoryBusTests {
         }
     }
 
+    /// <summary>
+    /// The fallback: once the front access array stops mirroring its list the in-place write has
+    /// nowhere safe to land, so the commit rebuilds from the list a bounded slice at a time. That
+    /// rebuild is still what keeps a mass structural change from spiking one frame.
+    /// </summary>
     [Test]
-    public void CommitTrees_WithASmallBatchSize_SpansMultipleFrames() {
+    public void CommitTrees_WhenTheAccessArraysDesync_RebuildsASliceAtATime() {
+        var first = NewTree();
+        bus.ScheduleAdd(first);
+        bus.CommitTrees();
+
         JiggleMemoryBus.SetTransformAccessBatchSize(1);
-        var tree = NewTree();
-        bus.ScheduleAdd(tree);
+        DesyncTreeAccessArrays();
+        var second = NewTree();
+        bus.ScheduleAdd(second);
 
         bus.CommitTrees();
         bus.CommitTrees();
@@ -452,8 +594,9 @@ internal unsafe class JiggleMemoryBusTests {
         var partway = bus.treeCount;
         PumpTrees();
 
-        Assert.AreEqual(0, partway, "a one-per-frame slice cannot finish five transforms in three calls");
-        Assert.AreEqual(1, bus.treeCount);
+        Assert.AreEqual(1, partway, "a one-per-frame slice cannot rebuild ten transforms in three calls");
+        Assert.AreEqual(2, bus.treeCount, "and the rebuild still converges on the same state");
+        Assert.AreEqual(10, bus.transformCount);
     }
 
     // ------------------------------------------------------------- teleports
@@ -689,6 +832,8 @@ internal unsafe class JiggleMemoryBusTests {
     /// The managed mirror is the writer for scene colliders, so it has to retire slots whose
     /// transform died without a matching remove. Otherwise the commit copies the stale entry back
     /// over the read job's self-heal and the collider keeps colliding from wherever it last was.
+    /// Which slot the replacement lands in is not part of that contract — the reclaim pass hands
+    /// the dead index straight back to the allocator, so assert on what survives, not on where.
     /// </summary>
     [Test]
     public void SceneCollider_WhoseTransformWasDestroyed_IsRetiredOnTheNextCommit() {
@@ -700,8 +845,13 @@ internal unsafe class JiggleMemoryBusTests {
         bus.ScheduleAdd(JiggleSceneFactory.SphereCollider(scene.Spawn("replacement")));
         PumpColliders();
 
-        Assert.IsFalse(bus.sceneColliders[0].enabled);
-        Assert.IsTrue(bus.sceneColliders[1].enabled);
+        int enabled = 0;
+        for (int i = 0; i < bus.sceneColliderCount; i++) {
+            if (bus.sceneColliders[i].enabled) {
+                enabled++;
+            }
+        }
+        Assert.AreEqual(1, enabled, "the dead collider must not keep colliding alongside the replacement");
     }
 
     // ----------------------------------------------------- personal colliders
@@ -768,40 +918,66 @@ internal unsafe class JiggleMemoryBusTests {
 
     /// <summary>
     /// Tree regeneration is capped per flush, so a large dirty set arrives as several small batches.
-    /// A commit rebuilds the whole transform list, so committing each batch would turn one
-    /// structural change into as many full rebuilds as there were batches. The commit waits for the
-    /// backlog instead, and everything lands in one.
+    /// A rebuilding commit redoes the whole transform list, so committing each batch would turn one
+    /// structural change into as many full rebuilds as there were batches. A rebuilding commit waits
+    /// for the backlog instead, and everything lands in one.
     /// </summary>
     [Test]
-    public void CommitTrees_WhileTheRegenerationBacklogRemains_HoldsTheCommit() {
-        var tree = NewTree();
-        bus.ScheduleAdd(tree);
+    public void CommitTrees_RebuildingWhileTheRegenerationBacklogRemains_HoldsTheCommit() {
+        var first = NewTree();
+        bus.ScheduleAdd(first);
+        bus.CommitTrees();
+        DesyncTreeAccessArrays();
+
+        var second = NewTree();
+        bus.ScheduleAdd(second);
         bus.SetTreeBacklog(true);
 
         PumpTrees(4);
 
-        Assert.AreEqual(0, bus.treeCount, "the commit should wait while more dirty trees are still coming");
+        Assert.AreEqual(1, bus.treeCount, "the commit should wait while more dirty trees are still coming");
 
         bus.SetTreeBacklog(false);
-        PumpTrees(8);
+        PumpTrees();
 
-        Assert.AreEqual(1, bus.treeCount, "and land once the backlog has drained");
+        Assert.AreEqual(2, bus.treeCount, "and land once the backlog has drained");
     }
 
     /// <summary>
-    /// The safety valve. Deferring is keyed off a backlog flag the caller owns, so anything that
-    /// re-dirties every flush would otherwise hold the commit forever and jiggle would silently
-    /// never come online.
+    /// An in-place commit costs what the change costs, not what the whole transform list costs, so
+    /// there is nothing to coalesce — holding it behind the backlog would only delay rigs coming
+    /// online.
     /// </summary>
     [Test]
-    public void CommitTrees_WithABacklogThatNeverDrains_CommitsAnyway() {
+    public void CommitTrees_InPlaceWithABacklog_DoesNotHoldTheCommit() {
         var tree = NewTree();
         bus.ScheduleAdd(tree);
         bus.SetTreeBacklog(true);
 
+        bus.CommitTrees();
+
+        Assert.AreEqual(1, bus.treeCount);
+    }
+
+    /// <summary>
+    /// The safety valve. Deferring is keyed off a backlog flag the caller owns, so anything that
+    /// re-dirties every flush would otherwise hold a rebuilding commit forever and jiggle would
+    /// silently never come online.
+    /// </summary>
+    [Test]
+    public void CommitTrees_WithABacklogThatNeverDrains_CommitsAnyway() {
+        var first = NewTree();
+        bus.ScheduleAdd(first);
+        bus.CommitTrees();
+        DesyncTreeAccessArrays();
+
+        var second = NewTree();
+        bus.ScheduleAdd(second);
+        bus.SetTreeBacklog(true);
+
         PumpTrees(32);
 
-        Assert.AreEqual(1, bus.treeCount, "the deferral cap must bound how long a stuck backlog can stall the commit");
+        Assert.AreEqual(2, bus.treeCount, "the deferral cap must bound how long a stuck backlog can stall the commit");
     }
 
     [Test]

@@ -219,6 +219,7 @@ namespace BasisNetworkServer.Security
             if (!NetworkServer.AuthIdentity.NetIDToUUID(peer, out string UUID))
             {
                 SendBackMessage(peer, "UUID not found");
+                reader.Recycle();
                 return;
             }
 
@@ -232,10 +233,12 @@ namespace BasisNetworkServer.Security
                 if (!PermissionIntegration.HasValidRequirement(peer, PermNodes.PermissionsView))
                 {
                     SendBackMessage(peer, "No permission: view");
+                    reader.Recycle();
                     return;
                 }
 
                 HandleGetPermissions(peer);
+                reader.Recycle();
                 return;
             }
 
@@ -405,6 +408,31 @@ namespace BasisNetworkServer.Security
                 case AdminRequestMode.GlobalToggleEndEffectorIK:
                     Require(peer, PermNodes.ModerationGlobalLock, () =>
                         HandleGlobalToggle(peer, "Remote end-effector IK", BasisGlobalLockManager.ToggleEndEffectorIK()));
+                    break;
+
+                case AdminRequestMode.GlobalToggleTextChat:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Text chat", BasisGlobalLockManager.ToggleTextChat()));
+                    break;
+
+                case AdminRequestMode.GlobalToggleVoiceChat:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Voice chat", BasisGlobalLockManager.ToggleVoiceChat()));
+                    break;
+
+                case AdminRequestMode.GlobalToggleMediaPlayer:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Media player", BasisGlobalLockManager.ToggleMediaPlayer()));
+                    break;
+
+                case AdminRequestMode.GlobalToggleCameraCapture:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Camera capture", BasisGlobalLockManager.ToggleCameraCapture()));
+                    break;
+
+                case AdminRequestMode.GlobalTogglePropGrabbing:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Prop grabbing", BasisGlobalLockManager.TogglePropGrabbing()));
                     break;
 
                 case AdminRequestMode.SetGlobalAvatarScaleLimits:
@@ -817,18 +845,12 @@ namespace BasisNetworkServer.Security
 
         private static void HandleResourceLimitsSet(NetPeer peer, NetPacketReader reader)
         {
-            int maxDatabaseEntries = reader.GetInt();
-            int maxDatabaseNameLength = reader.GetInt();
-            int maxDatabasePayloadEntries = reader.GetInt();
             int maxContentSpheresPerPlayer = reader.GetInt();
-            BasisResourceLimitManager.SetLimits(maxDatabaseEntries, maxDatabaseNameLength, maxDatabasePayloadEntries, maxContentSpheresPerPlayer);
-            NetworkServer.Configuration.MaxDatabaseEntries = BasisResourceLimitManager.MaxDatabaseEntries;
-            NetworkServer.Configuration.MaxDatabaseNameLength = BasisResourceLimitManager.MaxDatabaseNameLength;
-            NetworkServer.Configuration.MaxDatabasePayloadEntries = BasisResourceLimitManager.MaxDatabasePayloadEntries;
+            BasisResourceLimitManager.SetLimits(maxContentSpheresPerPlayer);
             NetworkServer.Configuration.MaxContentSpheresPerPlayer = BasisResourceLimitManager.MaxContentSpheresPerPlayer;
             SaveConfig();
             BasisResourceLimitManager.BroadcastState();
-            SendBackMessage(peer, $"Resource limits set: db entries {BasisResourceLimitManager.MaxDatabaseEntries}, name length {BasisResourceLimitManager.MaxDatabaseNameLength}, payload entries {BasisResourceLimitManager.MaxDatabasePayloadEntries}, spheres/player {BasisResourceLimitManager.MaxContentSpheresPerPlayer}.");
+            SendBackMessage(peer, $"Resource limits set: spheres/player {BasisResourceLimitManager.MaxContentSpheresPerPlayer}.");
         }
 
         private static void HandleReductionSettingsSet(NetPeer peer, NetPacketReader reader)

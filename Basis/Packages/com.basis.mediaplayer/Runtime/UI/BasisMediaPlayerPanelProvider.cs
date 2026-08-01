@@ -20,7 +20,16 @@ namespace Basis.BasisUI.MediaPlayer
         public override bool Hidden => BasisMediaPlayerRegistry.Count == 0;
 
         private BasisMenuPanel _panel;
-        private RectTransform _scrollContent;
+        private PanelTabGroup _tabGroup;
+        private RectTransform _navColumn;
+        private readonly List<RectTransform> _pageContents = new List<RectTransform>();
+        private int _playbackTabIndex = -1;
+        private int _adminTabIndex = -1;
+        private int _debugTabIndex = -1;
+
+        /// <summary>Tab the panel was left on, so reopening it lands back where the user was.</summary>
+        private static int _lastTabIndex;
+
         private PanelDropdown _selector;
         private PanelElementDescriptor _controlGroup;
         private PanelElementDescriptor _userGroup;
@@ -88,10 +97,10 @@ namespace Basis.BasisUI.MediaPlayer
             PanelElementDescriptor group = PanelElementDescriptor.CreateNew(
                 PanelElementDescriptor.ElementStyles.Group, parent);
             group.SetTitle(StaticTitle);
-            group.SetDescription("Open the media player panel to control playback and per-player volume.");
+            group.SetDescription(BasisLocalization.Get("mediaPlayer.title.description"));
 
             PanelButton open = PanelButton.CreateNew(group.ContentParent);
-            open.Descriptor.SetTitle("Open Media Players");
+            open.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.openMediaPlayers"));
             open.OnClicked += () => _instance?.RunAction();
         }
 
@@ -131,50 +140,189 @@ namespace Basis.BasisUI.MediaPlayer
 
             panel.OnInstanceReleased += OnPanelClosed;
 
-            RectTransform container = panel.Descriptor.ContentParent;
-            PanelElementDescriptor scroll = PanelElementDescriptor.CreateNew(
-                PanelElementDescriptor.ElementStyles.ScrollViewVertical, container);
-            _scrollContent = scroll.ContentParent;
+            _tabGroup = PanelTabGroup.CreateNew(panel.Descriptor.ContentParent, LayoutDirection.Vertical);
+            _navColumn = _tabGroup.ExtrasContainer;
+            _pageContents.Clear();
 
-            // The shared scroll-view prefab ships a bare, zero-anchored viewport
-            // with no mask, so content taller than the panel draws straight past
-            // its bounds (Page-style panels have no panel-level mask to catch
-            // it). Bound the viewport to the scroll rect and mask it — the
-            // standard scroll-view construction — so this panel's content clips
-            // and scrolls like the settings pages.
-            if (scroll.TryGetComponent(out ScrollRect scrollRect) && scrollRect.viewport != null)
-            {
-                RectTransform viewport = scrollRect.viewport;
-                viewport.anchorMin = Vector2.zero;
-                viewport.anchorMax = Vector2.one;
-                viewport.offsetMin = Vector2.zero;
-                viewport.offsetMax = new Vector2(-25f, 0f); // clear of the vertical scrollbar
-                if (!viewport.TryGetComponent(out RectMask2D _))
-                {
-                    viewport.gameObject.AddComponent<RectMask2D>();
-                }
-            }
-
-            _selector = PanelDropdown.CreateNewEntry(_scrollContent);
-            _selector.Descriptor.SetTitle("Player");
+            // The label-carrying entry prefab reserves 500 units for its control beside the title,
+            // which does not fit the navigation column at all. The no-title variant drops that
+            // reservation — the same one the Library panel uses in this container.
+            _selector = PanelDropdown.CreateNew(PanelDropdown.DropdownStyles.EntryNoLabel, _navColumn);
+            _selector.Descriptor.SetSize(new Vector2(60, 80));
+            FitToNavColumn(_selector.Descriptor, releaseControlSlot: false);
             _selector.OnValueChanged = _ => OnSelectionChanged();
 
             _emptyState = PanelElementDescriptor.CreateNew(
-                PanelElementDescriptor.ElementStyles.Group, _scrollContent);
-            _emptyState.SetTitle("No Media Players");
-            _emptyState.SetDescription("Spawn or load a prop/scene that contains a Basis Media Player.");
+                PanelElementDescriptor.ElementStyles.Group, _navColumn);
+            _emptyState.SetTitle(BasisLocalization.Get("mediaPlayer.noMediaPlayers"));
+            _emptyState.SetDescription(BasisLocalization.Get("mediaPlayer.noMediaPlayers.description"));
+            FitToNavColumn(_emptyState, releaseControlSlot: true);
 
-            BuildStatusGroup(_scrollContent);
-            BuildControlGroup(_scrollContent);
-            BuildUserGroup(_scrollContent);
-            BuildAdminGroup(_scrollContent);
-            BuildDebugGroup(_scrollContent);
+            // The status line frames every page rather than belonging to one, so it sits in the
+            // navigation column and stays readable while the other tabs are being used.
+            BuildStatusGroup(_navColumn);
+            FitToNavColumn(_statusGroup, releaseControlSlot: true);
+
+            _playbackTabIndex = AddTab("mediaPlayer.playback", BuildControlGroup);
+            AddTab("mediaPlayer.mySettings", BuildUserGroup);
+            _adminTabIndex = AddTab("mediaPlayer.admin", BuildAdminGroup);
+            _debugTabIndex = AddTab("mediaPlayer.debug", BuildDebugGroup);
+
+            // Both are opt-in: Admin needs the permission and a networked player, Debug is behind
+            // the Advanced toggle. They are shown again by ApplyActivePlayerToControls / that toggle.
+            SetTabVisible(_adminTabIndex, false);
+            SetTabVisible(_debugTabIndex, false);
 
             RebuildSelector();
+
+            if (_lastTabIndex > 0 && _lastTabIndex < _tabGroup.SelectionButtons.Count &&
+                _tabGroup.SelectionButtons[_lastTabIndex] != null &&
+                _tabGroup.SelectionButtons[_lastTabIndex].gameObject.activeSelf)
+            {
+                _tabGroup.SelectionButtons[_lastTabIndex].OnClicked?.Invoke();
+            }
 
             // One frame-clock request for the panel's lifetime keeps the Status line
             // live (Connecting → Buffering → Playing/Error are polled, not evented).
             SetPanelTickSubscription(true);
+        }
+
+        /// <summary>
+        /// Builds one tab and files it under the left-hand navigation, returning its index so the
+        /// tabs that come and go with permissions can be shown and hidden by it. The page is
+        /// populated before it is handed to the group, so every row is instantiated while the page
+        /// is still active and its deferred Awake cannot overwrite the titles set here.
+        /// </summary>
+        private int AddTab(string tabKey, System.Action<RectTransform> build)
+        {
+            PanelTabPage page = PanelTabPage.CreateVertical(_tabGroup.Descriptor.ContentParent);
+            PanelElementDescriptor descriptor = page.Descriptor;
+            descriptor.SetIcon(AddressableAssets.Sprites.Camera);
+            descriptor.SetTitle(BasisLocalization.Get(tabKey));
+
+            ClampScrollViewport(descriptor.ContentParent);
+            build(descriptor.ContentParent);
+            _pageContents.Add(descriptor.ContentParent);
+
+            int index = _tabGroup.Pages.Count;
+            PanelScrollMemory.Attach(descriptor.ContentParent, "mediaplayer/" + tabKey);
+            _tabGroup.AddTab(BasisLocalization.Get(tabKey), () => _lastTabIndex = index, page);
+            return index;
+        }
+
+        /// <summary>
+        /// The shared scroll-view prefab ships a bare, zero-anchored viewport with no mask, so
+        /// content taller than the page draws straight past its bounds (Page-style panels have no
+        /// panel-level mask to catch it). Bound the viewport to the scroll rect and mask it — the
+        /// standard scroll-view construction — so a tab clips and scrolls like the settings pages.
+        /// </summary>
+        private static void ClampScrollViewport(RectTransform content)
+        {
+            if (content == null) return;
+
+            ScrollRect scroll = content.GetComponentInParent<ScrollRect>();
+            if (scroll == null || scroll.viewport == null) return;
+
+            RectTransform viewport = scroll.viewport;
+            viewport.anchorMin = Vector2.zero;
+            viewport.anchorMax = Vector2.one;
+            viewport.offsetMin = Vector2.zero;
+            viewport.offsetMax = new Vector2(-25f, 0f); // clear of the vertical scrollbar
+            if (!viewport.TryGetComponent(out RectMask2D _))
+            {
+                viewport.gameObject.AddComponent<RectMask2D>();
+            }
+        }
+
+        /// <summary>
+        /// Card prefabs keep an icon slot and a control slot beside their labels, both sized for the
+        /// full-width page. Together they are wider than the navigation column, so the layout falls
+        /// back to minimums and hands the labels a width of zero — which renders their text one
+        /// character per line. Drop the icon, and on the cards that carry no control, the slot too.
+        /// </summary>
+        private static void FitToNavColumn(PanelElementDescriptor element, bool releaseControlSlot)
+        {
+            if (element == null) return;
+
+            if (element.IconBackground != null) element.IconBackground.SetActive(false);
+            if (!releaseControlSlot || element.Header == null) return;
+
+            Transform slot = element.Header.Find("Title/Element");
+            if (slot != null) slot.gameObject.SetActive(false);
+        }
+
+        private RectTransform ActivePageContent()
+        {
+            if (_tabGroup == null || _pageContents.Count == 0) return null;
+            return _pageContents[Mathf.Clamp(_tabGroup.Value, 0, _pageContents.Count - 1)];
+        }
+
+        /// <summary>
+        /// Reflows a page after rows inside it were shown or hidden. Rebuilding the group on its own
+        /// leaves every card above it at its stale height, and the page root carries no layout
+        /// controller at all — so the pass has to walk out from what changed to the scroll content.
+        /// </summary>
+        private void RebuildPage(PanelElementDescriptor group)
+        {
+            if (group == null) return;
+            PanelElementDescriptor.RebuildLayoutChain(group.ContentParent, ActivePageContent());
+        }
+
+        /// <summary>
+        /// Same, for the navigation column: the status card grows and shrinks with the text in it, so
+        /// the column has to be measured again or the rows under it keep the old spacing.
+        /// </summary>
+        private void RebuildNavColumn(PanelElementDescriptor card = null)
+        {
+            if (_navColumn == null) return;
+
+            // From the label out: the text sits three layout groups deep inside the card, and every
+            // one of them has to be measured again before the card knows how tall it now is.
+            RectTransform from = card != null && card.DescriptionLabel != null
+                ? card.DescriptionLabel.rectTransform
+                : _navColumn;
+            PanelElementDescriptor.RebuildLayoutChain(from, _navColumn);
+        }
+
+        /// <summary>
+        /// Shows or hides a tab button. A tab the user is standing on can be taken away — losing
+        /// control of a player closes Playback — so the selection moves to the first one left.
+        /// </summary>
+        private void SetTabVisible(int index, bool visible)
+        {
+            if (_tabGroup == null || index < 0 || index >= _tabGroup.SelectionButtons.Count) return;
+
+            PanelButton button = _tabGroup.SelectionButtons[index];
+            if (button == null || button.gameObject.activeSelf == visible) return;
+
+            button.gameObject.SetActive(visible);
+            if (!visible && _tabGroup.Value == index) SelectFirstVisibleTab();
+
+            if (_tabGroup.TabButtonParent != null)
+            {
+                LayoutRebuilder.ForceRebuildLayoutImmediate(_tabGroup.TabButtonParent);
+            }
+            RebuildNavColumn();
+        }
+
+        private bool IsTabVisible(int index)
+        {
+            if (_tabGroup == null || index < 0 || index >= _tabGroup.SelectionButtons.Count) return false;
+
+            PanelButton button = _tabGroup.SelectionButtons[index];
+            return button != null && button.gameObject.activeSelf;
+        }
+
+        private void SelectFirstVisibleTab()
+        {
+            for (int Index = 0; Index < _tabGroup.SelectionButtons.Count; Index++)
+            {
+                PanelButton button = _tabGroup.SelectionButtons[Index];
+                if (button == null || !button.gameObject.activeSelf) continue;
+
+                button.OnClicked?.Invoke();
+                return;
+            }
         }
 
         private void OnPanelClosed()
@@ -187,7 +335,12 @@ namespace Basis.BasisUI.MediaPlayer
             // singleton) always repaints its fresh "—" status group on first tick.
             _lastStatus = (BasisMediaPlayerStatus)(-1);
             _panel = null;
-            _scrollContent = null;
+            _tabGroup = null;
+            _navColumn = null;
+            _pageContents.Clear();
+            _playbackTabIndex = -1;
+            _adminTabIndex = -1;
+            _debugTabIndex = -1;
             _selector = null;
             _controlGroup = null;
             _userGroup = null;
@@ -226,17 +379,17 @@ namespace Basis.BasisUI.MediaPlayer
         private void BuildControlGroup(RectTransform parent)
         {
             _controlGroup = PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, parent);
-            _controlGroup.SetTitle("Playback");
-            _controlGroup.SetDescription("Requires the basis.mediaplayer.control permission, or Anyone Can Control on this player.");
+            _controlGroup.SetTitle(BasisLocalization.Get("mediaPlayer.playback"));
+            _controlGroup.SetDescription(BasisLocalization.Get("mediaPlayer.playback.description"));
             RectTransform content = _controlGroup.ContentParent;
 
             _urlField = PanelTextField.CreateNewEntry(content);
-            _urlField.Descriptor.SetTitle("URL");
+            _urlField.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.url"));
 
             RectTransform actions = PanelElementDescriptor.BuildActionRow(content, "MediaPlayerActions");
 
             PanelButton loadBtn = PanelButton.CreateNew(actions);
-            loadBtn.Descriptor.SetTitle("Load URL");
+            loadBtn.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.loadUrl"));
             loadBtn.OnClicked += () =>
             {
                 if (_activePlayer == null || _urlField == null) return;
@@ -251,7 +404,7 @@ namespace Basis.BasisUI.MediaPlayer
             };
 
             PanelButton playBtn = PanelButton.CreateNew(actions);
-            playBtn.Descriptor.SetTitle("Play");
+            playBtn.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.play"));
             playBtn.OnClicked += () =>
             {
                 if (_activePlayer == null) return;
@@ -260,7 +413,7 @@ namespace Basis.BasisUI.MediaPlayer
             };
 
             PanelButton pauseBtn = PanelButton.CreateNew(actions);
-            pauseBtn.Descriptor.SetTitle("Pause");
+            pauseBtn.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.pause"));
             pauseBtn.OnClicked += () =>
             {
                 if (_activePlayer == null) return;
@@ -269,7 +422,7 @@ namespace Basis.BasisUI.MediaPlayer
             };
 
             PanelButton stopBtn = PanelButton.CreateNew(actions);
-            stopBtn.Descriptor.SetTitle("Stop");
+            stopBtn.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.stop"));
             stopBtn.OnClicked += () =>
             {
                 if (_activePlayer == null) return;
@@ -286,7 +439,7 @@ namespace Basis.BasisUI.MediaPlayer
             // from the user's.
             _seekSlider = PanelSlider.CreateNew(content);
             _seekSlider.SetSliderSettings(PanelSlider.SliderSettings.Advanced(
-                "Position", 0f, 100f, false, 0, ValueDisplayMode.Percentage));
+                BasisLocalization.Get("mediaPlayer.position"), 0f, 100f, false, 0, ValueDisplayMode.Percentage));
             // uGUI's own event, not the panel Action (which only fires on
             // release): every drag move must re-arm the debounce, or the
             // per-tick playhead writes would snap the handle away mid-drag.
@@ -299,7 +452,7 @@ namespace Basis.BasisUI.MediaPlayer
             _seekSlider.gameObject.SetActive(false);
 
             _bitrateDropdown = PanelDropdown.CreateNewEntry(content);
-            _bitrateDropdown.Descriptor.SetTitle("Bitrate");
+            _bitrateDropdown.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.bitrate"));
             _bitrateDropdown.OnValueChanged = _ =>
             {
                 if (_activePlayer == null || _bitrateDropdown == null) return;
@@ -308,7 +461,7 @@ namespace Basis.BasisUI.MediaPlayer
             };
 
             _audioTrackDropdown = PanelDropdown.CreateNewEntry(content);
-            _audioTrackDropdown.Descriptor.SetTitle("Audio Track");
+            _audioTrackDropdown.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.audioTrack"));
             _audioTrackDropdown.OnValueChanged = _ =>
             {
                 if (_activePlayer == null || _audioTrackDropdown == null) return;
@@ -320,12 +473,12 @@ namespace Basis.BasisUI.MediaPlayer
         private void BuildUserGroup(RectTransform parent)
         {
             _userGroup = PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, parent);
-            _userGroup.SetTitle("My Settings");
-            _userGroup.SetDescription("Client-side controls — only affect your own playback.");
+            _userGroup.SetTitle(BasisLocalization.Get("mediaPlayer.mySettings"));
+            _userGroup.SetDescription(BasisLocalization.Get("mediaPlayer.mySettings.description"));
             RectTransform content = _userGroup.ContentParent;
 
             _volumeSlider = PanelSlider.CreateNew(content);
-            _volumeSlider.SetSliderSettings(PanelSlider.SliderSettings.Percentage("Volume"));
+            _volumeSlider.SetSliderSettings(PanelSlider.SliderSettings.Percentage(BasisLocalization.Get("mediaPlayer.volume")));
             _volumeSlider.OnValueChanged = v =>
             {
                 if (_activePlayer == null) return;
@@ -340,8 +493,8 @@ namespace Basis.BasisUI.MediaPlayer
             };
 
             _captionsToggle = PanelToggle.CreateNewEntry(content);
-            _captionsToggle.Descriptor.SetTitle("Captions (CC)");
-            _captionsToggle.Descriptor.SetDescription("Show closed captions when the stream or its subtitle tracks carry them.");
+            _captionsToggle.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.captionsCc"));
+            _captionsToggle.Descriptor.SetDescription(BasisLocalization.Get("mediaPlayer.captionsCc.description"));
             _captionsToggle.OnValueChanged = v =>
             {
                 if (_activePlayer != null) _activePlayer.CaptionsEnabled = v;
@@ -353,7 +506,7 @@ namespace Basis.BasisUI.MediaPlayer
             // panel stays clutter-free for everything else. Row 0 returns to
             // the in-band default.
             _subtitleDropdown = PanelDropdown.CreateNewEntry(content);
-            _subtitleDropdown.Descriptor.SetTitle("Subtitles");
+            _subtitleDropdown.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.subtitles"));
             _subtitleDropdown.OnValueChanged = _ =>
             {
                 if (_activePlayer == null || _subtitleDropdown == null) return;
@@ -362,14 +515,14 @@ namespace Basis.BasisUI.MediaPlayer
             _subtitleDropdown.gameObject.SetActive(false);
 
             _captionTextOpacitySlider = PanelSlider.CreateNew(content);
-            _captionTextOpacitySlider.SetSliderSettings(PanelSlider.SliderSettings.Percentage("Text Opacity"));
+            _captionTextOpacitySlider.SetSliderSettings(PanelSlider.SliderSettings.Percentage(BasisLocalization.Get("mediaPlayer.textOpacity")));
             _captionTextOpacitySlider.OnValueChanged = v =>
             {
                 if (_activePlayer != null) _activePlayer.CaptionTextOpacity = Mathf.Clamp01(v / 100f);
             };
 
             _captionBgOpacitySlider = PanelSlider.CreateNew(content);
-            _captionBgOpacitySlider.SetSliderSettings(PanelSlider.SliderSettings.Percentage("Background Opacity"));
+            _captionBgOpacitySlider.SetSliderSettings(PanelSlider.SliderSettings.Percentage(BasisLocalization.Get("mediaPlayer.backgroundOpacity")));
             _captionBgOpacitySlider.OnValueChanged = v =>
             {
                 if (_activePlayer != null) _activePlayer.CaptionBackgroundOpacity = Mathf.Clamp01(v / 100f);
@@ -377,7 +530,7 @@ namespace Basis.BasisUI.MediaPlayer
 
             RectTransform actions = PanelElementDescriptor.BuildActionRow(content, "MediaPlayerActions");
             PanelButton resyncBtn = PanelButton.CreateNew(actions);
-            resyncBtn.Descriptor.SetTitle("Resync");
+            resyncBtn.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.resync"));
             resyncBtn.OnClicked += () =>
             {
                 if (_activePlayer == null) return;
@@ -385,7 +538,7 @@ namespace Basis.BasisUI.MediaPlayer
             };
 
             _advancedToggle = PanelToggle.CreateNewEntry(content);
-            _advancedToggle.Descriptor.SetTitle("Advanced");
+            _advancedToggle.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.advanced"));
             _advancedToggle.OnValueChanged = v =>
             {
                 ApplyAdvancedVisibility(v);
@@ -418,6 +571,7 @@ namespace Basis.BasisUI.MediaPlayer
                 _statusGroup?.SetActive(false);
                 SetGroupsActive(false);
                 _activePlayer = null;
+                RebuildNavColumn();
                 return;
             }
 
@@ -433,6 +587,7 @@ namespace Basis.BasisUI.MediaPlayer
             _selector.SetValueWithoutNotify(labels[idx]);
 
             ApplyActivePlayerToControls();
+            RebuildNavColumn();
         }
 
         private void OnSelectionChanged()
@@ -492,17 +647,19 @@ namespace Basis.BasisUI.MediaPlayer
                 _activePlayer.TryGetComponent(out _activeNetworking);
             }
 
-            bool canControl = CanControlActivePlayer();
-            _controlGroup?.SetActive(canControl);
+            // A player selected after the panel opened empty brings the navigation back with it.
             _userGroup?.SetActive(true);
+            if (_tabGroup != null && _tabGroup.TabButtonParent != null)
+            {
+                _tabGroup.TabButtonParent.gameObject.SetActive(true);
+            }
+
+            bool canControl = CanControlActivePlayer();
+            SetTabVisible(_playbackTabIndex, canControl);
+            SetTabVisible(_debugTabIndex, _advancedToggle != null && _advancedToggle.Value);
 
             bool showAdmin = IsAdmin() && _activeNetworking != null;
-            if (_adminGroup != null && _adminGroup.gameObject.activeSelf != showAdmin)
-            {
-                _adminGroup.gameObject.SetActive(showAdmin);
-                _adminGroup.ForceRebuild();
-                _panel?.Descriptor?.ForceRebuild();
-            }
+            SetTabVisible(_adminTabIndex, showAdmin);
 
             if (showAdmin)
             {
@@ -549,7 +706,11 @@ namespace Basis.BasisUI.MediaPlayer
             int sel = _activePlayer.SelectedBitrateIndex;
             int row = sel >= 0 && sel < tracks.Count ? sel + 1 : 0;
             if (row < labels.Count) _bitrateDropdown.SetValueWithoutNotify(labels[row]);
-            _bitrateDropdown.gameObject.SetActive(tracks.Count > 0);
+
+            bool show = tracks.Count > 0;
+            if (_bitrateDropdown.gameObject.activeSelf == show) return;
+            _bitrateDropdown.gameObject.SetActive(show);
+            RebuildPage(_controlGroup);
         }
 
         private void RebuildAudioTrackDropdown()
@@ -569,7 +730,11 @@ namespace Basis.BasisUI.MediaPlayer
             _audioTrackDropdown.AssignEntries(labels);
             int sel = _activePlayer.SelectedAudioTrackIndex;
             if (sel >= 0 && sel < labels.Count) _audioTrackDropdown.SetValueWithoutNotify(labels[sel]);
-            _audioTrackDropdown.gameObject.SetActive(tracks.Count > 0);
+
+            bool show = tracks.Count > 0;
+            if (_audioTrackDropdown.gameObject.activeSelf == show) return;
+            _audioTrackDropdown.gameObject.SetActive(show);
+            RebuildPage(_controlGroup);
         }
 
         private void RebuildSubtitleDropdown()
@@ -600,43 +765,41 @@ namespace Basis.BasisUI.MediaPlayer
         }
 
         // Anyone Can Control is network-synced policy, so the gate can flip while
-        // the panel is open — repaint the group instead of waiting for a reopen.
+        // the panel is open — repaint the tab instead of waiting for a reopen.
         private void RefreshControlGating()
         {
-            if (_controlGroup == null || _activePlayer == null) return;
+            if (_tabGroup == null || _activePlayer == null) return;
 
             bool canControl = CanControlActivePlayer();
-            if (_controlGroup.gameObject.activeSelf == canControl) return;
+            if (IsTabVisible(_playbackTabIndex) == canControl) return;
 
-            _controlGroup.SetActive(canControl);
+            SetTabVisible(_playbackTabIndex, canControl);
             if (canControl) SyncUrlFieldToActivePlayer();
-            _panel?.Descriptor?.ForceRebuild();
         }
 
         private void SetGroupsActive(bool active)
         {
-            _controlGroup?.SetActive(active && CanControlActivePlayer());
+            SetTabVisible(_playbackTabIndex, active && CanControlActivePlayer());
+            SetTabVisible(_adminTabIndex, active && IsAdmin() && _activeNetworking != null);
+            SetTabVisible(_debugTabIndex, active && _advancedToggle != null && _advancedToggle.Value);
             _userGroup?.SetActive(active);
 
-            bool showAdmin = active && IsAdmin() && _activeNetworking != null;
-            if (_adminGroup != null && _adminGroup.gameObject.activeSelf != showAdmin)
+            if (_tabGroup != null && _tabGroup.TabButtonParent != null)
             {
-                _adminGroup.gameObject.SetActive(showAdmin);
-                _adminGroup.ForceRebuild();
-                _panel?.Descriptor?.ForceRebuild();
+                _tabGroup.TabButtonParent.gameObject.SetActive(active);
             }
         }
 
         private void BuildAdminGroup(RectTransform parent)
         {
             _adminGroup = PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, parent);
-            _adminGroup.SetTitle("Admin");
-            _adminGroup.SetDescription("Network-synced policy. Visible only to clients with the basis.mediaplayer.control or * permission.");
+            _adminGroup.SetTitle(BasisLocalization.Get("mediaPlayer.admin"));
+            _adminGroup.SetDescription(BasisLocalization.Get("mediaPlayer.admin.description"));
             RectTransform content = _adminGroup.ContentParent;
 
             _adminOnlyToggle = PanelToggle.CreateNewEntry(content);
-            _adminOnlyToggle.Descriptor.SetTitle("Admin Only");
-            _adminOnlyToggle.Descriptor.SetDescription("Only clients with the control permission can take ownership.");
+            _adminOnlyToggle.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.adminOnly"));
+            _adminOnlyToggle.Descriptor.SetDescription(BasisLocalization.Get("mediaPlayer.adminOnly.description"));
             _adminOnlyToggle.SetValueWithoutNotify(false);
             _adminOnlyToggle.OnValueChanged = v =>
             {
@@ -649,8 +812,8 @@ namespace Basis.BasisUI.MediaPlayer
             };
 
             _allowAnyoneToggle = PanelToggle.CreateNewEntry(content);
-            _allowAnyoneToggle.Descriptor.SetTitle("Allow Anyone To Take Control");
-            _allowAnyoneToggle.Descriptor.SetDescription("When Admin Only is off, allows non-owners to take ownership.");
+            _allowAnyoneToggle.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.allowAnyoneToTakeControl"));
+            _allowAnyoneToggle.Descriptor.SetDescription(BasisLocalization.Get("mediaPlayer.allowAnyoneToTakeControl.description"));
             _allowAnyoneToggle.SetValueWithoutNotify(true);
             _allowAnyoneToggle.OnValueChanged = v =>
             {
@@ -663,8 +826,8 @@ namespace Basis.BasisUI.MediaPlayer
             };
 
             _anyoneCanControlToggle = PanelToggle.CreateNewEntry(content);
-            _anyoneCanControlToggle.Descriptor.SetTitle("Anyone Can Control");
-            _anyoneCanControlToggle.Descriptor.SetDescription("Lets clients without the control permission load URLs and drive playback.");
+            _anyoneCanControlToggle.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.anyoneCanControl"));
+            _anyoneCanControlToggle.Descriptor.SetDescription(BasisLocalization.Get("mediaPlayer.anyoneCanControl.description"));
             _anyoneCanControlToggle.SetValueWithoutNotify(false);
             _anyoneCanControlToggle.OnValueChanged = v =>
             {
@@ -677,7 +840,7 @@ namespace Basis.BasisUI.MediaPlayer
             };
 
             _driftSlider = PanelSlider.CreateNew(content);
-            _driftSlider.SetSliderSettings(PanelSlider.SliderSettings.Advanced("Drift Seek Threshold (s)", 0f, 10f, false, 2, ValueDisplayMode.Raw));
+            _driftSlider.SetSliderSettings(PanelSlider.SliderSettings.Advanced(BasisLocalization.Get("mediaPlayer.driftSeekThresholdS"), 0f, 10f, false, 2, ValueDisplayMode.Raw));
             _driftSlider.SetValueWithoutNotify(2f);
             _driftSlider.OnValueChanged = v =>
             {
@@ -688,52 +851,37 @@ namespace Basis.BasisUI.MediaPlayer
 
                 _ = _activeNetworking.SetDriftSeekThresholdSeconds(v);
             };
-
-            // Deactivate AFTER children are built. PanelElementDescriptor.Awake calls
-            // SetTitle(DefaultTitle)/SetDescription(DefaultDescription); if a child is
-            // instantiated under an inactive parent its Awake fires later and would
-            // overwrite the labels set above.
-            _adminGroup.gameObject.SetActive(false);
         }
 
         private void BuildStatusGroup(RectTransform parent)
         {
             _statusGroup = PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, parent);
-            _statusGroup.SetTitle("Status");
+            _statusGroup.SetTitle(BasisLocalization.Get("mediaPlayer.status"));
             _statusGroup.SetDescription("—");
         }
 
         private void BuildDebugGroup(RectTransform parent)
         {
             _debugGroup = PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.Group, parent);
-            _debugGroup.SetTitle("Debug");
-            _debugGroup.SetDescription("Toggle to surface live pipeline counters.");
+            _debugGroup.SetTitle(BasisLocalization.Get("mediaPlayer.debug"));
+            _debugGroup.SetDescription(BasisLocalization.Get("mediaPlayer.debug.description"));
             RectTransform content = _debugGroup.ContentParent;
 
             _debugToggle = PanelToggle.CreateNewEntry(content);
-            _debugToggle.Descriptor.SetTitle("Debug Mode");
+            _debugToggle.Descriptor.SetTitle(BasisLocalization.Get("mediaPlayer.debugMode"));
             _debugToggle.SetValueWithoutNotify(false);
             _debugToggle.OnValueChanged = v =>
             {
                 _debugMode = v;
                 ApplyVerboseLoggingToActivePlayer(v);
                 if (v) RefreshDebugInfo();
-                else _debugGroup?.SetDescription("Toggle to surface live pipeline counters.");
+                else _debugGroup?.SetDescription(BasisLocalization.Get("mediaPlayer.debug.description"));
             };
-
-            // See BuildAdminGroup: deactivate after children so their Awake doesn't
-            // clobber the title above.
-            _debugGroup.gameObject.SetActive(false);
         }
 
         private void ApplyAdvancedVisibility(bool visible)
         {
-            if (_debugGroup != null)
-            {
-                _debugGroup.gameObject.SetActive(visible);
-                _debugGroup.ForceRebuild();
-            }
-            _controlGroup?.ForceRebuild();
+            SetTabVisible(_debugTabIndex, visible);
         }
 
         private void ApplyCaptionOptionsVisibility(bool visible)
@@ -750,7 +898,7 @@ namespace Basis.BasisUI.MediaPlayer
                 bool show = captionsOn && _activePlayer != null && _activePlayer.SubtitleTracks.Count > 0;
                 _subtitleDropdown.gameObject.SetActive(show);
             }
-            _userGroup?.ForceRebuild();
+            RebuildPage(_userGroup);
         }
 
         private void ApplyVerboseLoggingToActivePlayer(bool enabled)
@@ -793,7 +941,7 @@ namespace Basis.BasisUI.MediaPlayer
             if (_seekSlider.gameObject.activeSelf != seekable)
             {
                 _seekSlider.gameObject.SetActive(seekable);
-                _controlGroup?.ForceRebuild();
+                RebuildPage(_controlGroup);
             }
             if (!seekable)
             {
@@ -937,6 +1085,9 @@ namespace Basis.BasisUI.MediaPlayer
             if (string.Equals(_lastStatusMarkup, markup)) return;
             _lastStatusMarkup = markup;
             _statusGroup.SetRichDescription(markup);
+            // The card grows and shrinks with the line count — a title arriving, an error clearing —
+            // so the column it sits in has to be measured again or the rows below it keep the gap.
+            RebuildNavColumn(_statusGroup);
         }
 
         private static string StatusLabel(BasisMediaPlayerStatus status)
@@ -975,7 +1126,7 @@ namespace Basis.BasisUI.MediaPlayer
             if (_debugGroup == null) return;
             if (_activePlayer == null)
             {
-                _debugGroup.SetDescription("No active player.");
+                _debugGroup.SetDescription(BasisLocalization.Get("mediaPlayer.noActivePlayer"));
                 return;
             }
 

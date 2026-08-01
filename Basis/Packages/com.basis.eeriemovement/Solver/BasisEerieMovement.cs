@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using Basis.Scripts.Common;
 using Unity.Collections;
+using Unity.Profiling;
 using UnityEngine;
 namespace Basis.IK
 {
@@ -34,9 +35,14 @@ namespace Basis.IK
         public BasisBoneHandle handleLeftUpperLeg, handleLeftLowerLeg, handleLeftFoot, handleLeftToe;
         public BasisBoneHandle handleRightUpperLeg, handleRightLowerLeg, handleRightFoot, handleRightToe;
         // Head -> hips, tip first. The CCD chain, with its per-joint rest frames and ranges of motion.
+        // The chain holds only the bones the avatar HAS -- neck / upperChest / chest are optional in a
+        // humanoid rig, so index-from-length arithmetic cannot identify the chest.
         public NativeArray<BasisBoneHandle> chainHeadToSpine;
         public NativeArray<BasisSpineRestFrame> chainSpineRestFrames;
         public NativeArray<BasisSpineRom> chainSpineRoms;
+        // Chest position in chainHeadToSpine: -1 = no chest bone; 0 = unset (hand-built job), which falls
+        // back to the legacy chainLen - 3 slot.
+        public int chainChestIdx;
 
         // ===== Per-frame targets: spine =====
         public Vector3 targetPositionHead, targetPositionHips;
@@ -193,15 +199,36 @@ namespace Basis.IK
         /// girdle hangs off, the girdle places the shoulders the arms hang off, and the legs run before
         /// the arms because the arm pass collides against the torso the spine has already settled.
         /// </summary>
+        // Per-pass markers, Burst-safe, so a timeline capture attributes the solve's cost to the
+        // pass that owns it before any further decomposition is attempted.
+        static readonly ProfilerMarker sMarkerSpinePass = new ProfilerMarker("BasisEerie.Spine");
+        static readonly ProfilerMarker sMarkerShoulderPass = new ProfilerMarker("BasisEerie.Shoulders");
+        static readonly ProfilerMarker sMarkerLegPass = new ProfilerMarker("BasisEerie.Legs");
+        static readonly ProfilerMarker sMarkerArmPass = new ProfilerMarker("BasisEerie.Arms");
+        static readonly ProfilerMarker sMarkerToePass = new ProfilerMarker("BasisEerie.Toes");
+        static readonly ProfilerMarker sMarkerOverrides = new ProfilerMarker("BasisEerie.TrackerOverrides");
+
         public void ProcessAnimation(BasisPoseStream stream)
         {
             CaptureCalibrationOffsets();
+            sMarkerSpinePass.Begin();
             SolveSpinePass(stream);
+            sMarkerSpinePass.End();
+            sMarkerShoulderPass.Begin();
             SolveShoulderPass(stream);
+            sMarkerShoulderPass.End();
+            sMarkerLegPass.Begin();
             SolveLegPass(stream);
+            sMarkerLegPass.End();
+            sMarkerArmPass.Begin();
             SolveArmPass(stream);
+            sMarkerArmPass.End();
+            sMarkerToePass.Begin();
             SolveToePass(stream);
+            sMarkerToePass.End();
+            sMarkerOverrides.Begin();
             ApplyTrackerOverrides(stream);
+            sMarkerOverrides.End();
         }
 
         // Per-frame reads so FBT recalibration (which updates these on the constraint data)

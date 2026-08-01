@@ -119,6 +119,15 @@ public class BasisLocalHandDriver
     /// </summary>
     public void ReInitialize(Animator OriginalAnimator)
     {
+        // Both paths below rebuild _nativePoseGrid, which the in-flight finger job reads.
+        // Join it here — the join inside RebuildTransformAccess comes after the grid has
+        // already been disposed under the job.
+        if (_hasScheduledJob)
+        {
+            _fingerJobHandle.Complete();
+            _hasScheduledJob = false;
+        }
+
         EntityId cacheKey = BasisAvatarModelCache.GetKey(OriginalAnimator);
 
         // --- Cache hit: copy pose grid data without instantiating a copy ---
@@ -390,6 +399,10 @@ public class BasisLocalHandDriver
     {
         if (_validJointCount == 0) return;
 
+        // _validJointCount freezes at build time; destroyed finger bones (avatar-swap gap
+        // before ReInitialize) auto-compact the array and would misalign JointMapping rows.
+        if (!_fingerTransforms.isCreated || _fingerTransforms.length != _validJointCount) return;
+
         // Defensive: complete previous frame if Apply wasn't called
         if (_hasScheduledJob)
         {
@@ -427,6 +440,9 @@ public class BasisLocalHandDriver
         };
         _fingerJobHandle = slerpJob.Schedule(_fingerTransforms);
         _hasScheduledJob = true;
+        // Apply now sits on the far side of the event driver's remote stages; kick so the job
+        // runs through that window instead of waiting for the next flush.
+        JobHandle.ScheduleBatchedJobs();
     }
 
     /// <summary>

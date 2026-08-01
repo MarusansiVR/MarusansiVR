@@ -69,20 +69,33 @@ public class BasisPropSDKInspector : Editor
             PropNameField.RegisterCallback<ChangeEvent<string>>(PropNameChanged);
             PropDescriptionField.RegisterCallback<ChangeEvent<string>>(PropDescriptionChanged);
 
-            // Icon field
+            // Icon field, plus the capture buttons that fill it in. Bound to the serialized
+            // property rather than written by hand so both routes land on the undo stack.
             ObjectField PropIconField = uiElementsRoot.Q<ObjectField>(BasisSDKConstants.PropIcon);
             PropIconField.objectType = typeof(Texture2D);
             PropIconField.allowSceneObjects = true;
-            PropIconField.value = BasisProp.BasisBundleDescription.AssetBundleIcon;
-            PropIconField.RegisterCallback<ChangeEvent<UnityEngine.Object>>(OnIconFieldChanged);
+            BasisSDKCommonInspector.CreateIconTools(
+                PropIconField,
+                serializedObject,
+                BasisProp,
+                BasisEditorLocalization.Get("sdk.prop.icon.generate"),
+                BasisEditorLocalization.Get("sdk.prop.icon.generate.tooltip"),
+                () => BasisIconCapture.CaptureGameObject(BasisProp.gameObject, BasisIconCapture.PropYaw, BasisIconCapture.PropPitch));
 
-            // Content tags + build options
-            BasisSDKCommonInspector.CreateContentTagsFoldout(uiElementsRoot, BasisProp);
-            BasisSDKCommonInspector.CreateBuildTargetOptions(uiElementsRoot);
-            BasisSDKCommonInspector.CreateBuildOptionsDropdown(uiElementsRoot);
+            // Parented into the UXML blocks so they pick up that styling rather than trailing off
+            // the end of the inspector: what the prop is goes under Settings, how it is published
+            // goes in the build blocks above the build button, each its own collapsible section.
+            VisualElement settingsContainer = BasisSDKCommonInspector.ResolveSettingsContainer(uiElementsRoot);
+            BasisSDKCommonInspector.CreatePropSpawnFoldout(settingsContainer, BasisProp);
+
+            BasisSDKCommonInspector.CreateBuildTargetOptions(BasisSDKCommonInspector.ResolveBuildTargetsContainer(uiElementsRoot));
+            BasisSDKCommonInspector.CreateBuildOptionsDropdown(BasisSDKCommonInspector.ResolveBuildContainer(uiElementsRoot));
+
+            BasisSDKCommonInspector.CreateContentTagsFoldout(BasisSDKCommonInspector.ResolveContentTagsContainer(uiElementsRoot), BasisProp);
 
             BasisAssetBundleObject assetBundleObject = AssetDatabase.LoadAssetAtPath<BasisAssetBundleObject>(BasisAssetBundleObject.AssetBundleObject);
             Button BuildButton = BasisHelpersGizmo.Button(uiElementsRoot, BasisSDKConstants.BuildButton);
+            BasisSDKCommonInspector.StyleBuildButton(BuildButton);
             BuildButton.clicked += () => Build(BuildButton, assetBundleObject.selectedTargets, BasisProp.BasisBundleDescription.AssetBundleIcon);
         }
         else
@@ -96,13 +109,6 @@ public class BasisPropSDKInspector : Editor
                 BasisProp != null ? BasisProp.gameObject : null,
                 BundledContentHolder.Selector.Prop));
         return rootElement;
-    }
-
-    private void OnIconFieldChanged(ChangeEvent<UnityEngine.Object> evt)
-    {
-        BasisProp.BasisBundleDescription.AssetBundleIcon = evt.newValue as Texture2D;
-        EditorUtility.SetDirty(BasisProp);
-        BasisDebug.Log($"Setting to {BasisProp.BasisBundleDescription.AssetBundleIcon}");
     }
 
     private void PropNameChanged(ChangeEvent<string> evt)

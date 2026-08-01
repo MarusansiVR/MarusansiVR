@@ -186,7 +186,9 @@ public struct BasisAvatarCapJob : IJob
 
     public void Execute()
     {
-        if (MaxVisible <= 0 || ReceiverCount <= 0)
+        // The job only runs when the limiter is enabled, so 0 means "show zero real
+        // avatars", not unlimited — unlimited is the limiter toggle being off.
+        if (MaxVisible < 0 || ReceiverCount <= 0)
         {
             return;
         }
@@ -280,57 +282,6 @@ public struct BasisAvatarCapJob : IJob
         AvatarCapEntry tmp = Entries[a];
         Entries[a] = Entries[b];
         Entries[b] = tmp;
-    }
-}
-
-/// <summary>
-/// Burst job: filters AvatarRange based on view-cone direction.
-/// Only players within the specified cone angle (relative to the local
-/// camera forward) keep AvatarRange = true. Players outside the cone
-/// have AvatarRange set to false, causing a fallback avatar.
-/// Scheduled after distance + cap jobs so it acts as a final filter.
-/// Uses hysteresis: players already visible use a wider exit threshold
-/// to prevent flickering when the camera wobbles near the cone boundary.
-/// </summary>
-[BurstCompile(FloatMode = FloatMode.Fast, FloatPrecision = FloatPrecision.Standard)]
-public struct BasisViewConeAvatarJob : IJobParallelFor
-{
-    public float3 ListenerPosition;
-    public float3 ListenerForward;
-    public float CosHalfCone;
-    /// <summary>Wider threshold for players that were visible last frame (lower cosine = wider angle).</summary>
-    public float CosHalfConeExit;
-
-    [ReadOnly] public NativeArray<float3> TargetPositions;
-    [ReadOnly] public NativeArray<bool> PrevInAvatarRange;
-
-    [NativeDisableParallelForRestriction]
-    public NativeArray<bool> AvatarRange;
-
-    public void Execute(int i)
-    {
-        if (!AvatarRange[i])
-        {
-            return;
-        }
-
-        float3 toTarget = TargetPositions[i] - ListenerPosition;
-        float sqrMag = math.lengthsq(toTarget);
-
-        if (sqrMag < 0.001f)
-        {
-            return;
-        }
-
-        float3 dir = toTarget * math.rsqrt(sqrMag);
-        float dot = math.dot(ListenerForward, dir);
-
-        // Hysteresis: players already visible use a wider exit cone
-        float threshold = PrevInAvatarRange[i] ? CosHalfConeExit : CosHalfCone;
-        if (dot < threshold)
-        {
-            AvatarRange[i] = false;
-        }
     }
 }
 

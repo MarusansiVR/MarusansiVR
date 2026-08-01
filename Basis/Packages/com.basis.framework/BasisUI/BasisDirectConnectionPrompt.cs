@@ -56,12 +56,14 @@ namespace Basis.BasisUI
             PanelTabPage tab = PanelTabPage.CreateVertical(panel.Descriptor.ContentParent);
             RectTransform root = tab.Descriptor.ContentParent;
 
-            // The warning body (with the colored "Accepting reveals your IP address"
-            // notice) shown in a Group so it actually renders — the tab descriptor's
-            // own description isn't surfaced, so it would only show the panel title.
+            // The warning body shown in a Group so it actually renders — the tab descriptor's
+            // own description isn't surfaced, so it would only show the panel title. The card
+            // reads hot rather than colouring the "Accepting reveals your IP address" sentence
+            // itself, so the severity is stated the same way the settings cards state theirs.
             PanelElementDescriptor info = PanelElementDescriptor.CreateNew(
                 PanelElementDescriptor.ElementStyles.Group, root);
             info.SetDescription(body);
+            BasisPanelTint.Apply(BasisPanelTint.Capture(info), BasisPanelSeverity.Hot, false);
 
             // Per-person policy dropdown — identical control to the individual player panel,
             // so the recipient can change it right here.
@@ -111,11 +113,18 @@ namespace Basis.BasisUI
             // Closed before answering (menu closed, etc.) → recover from the bell.
             panel.OnInstanceReleased += () =>
             {
-                if (answered) return;
-                answered = true;
-                BasisNotificationCenter.AddPending(title, body, AddressableAssets.Sprites.Network,
-                    reopen: () => Show(displayName, uuid, respond, true),
-                    onDismiss: () => respond(false));
+                if (!answered)
+                {
+                    answered = true;
+                    BasisNotificationCenter.AddPending(title, body, AddressableAssets.Sprites.Network,
+                        reopen: () => Show(displayName, uuid, respond, true),
+                        onDismiss: () => respond(false));
+                }
+
+                // Opening the menu above tore down the page and virtual keyboard the user had
+                // up; put them back now the prompt is gone. Runs after the pending entry is
+                // filed so a restored notification page already lists it.
+                BasisMenuPromptRestore.RestoreAfterPrompt();
             };
 
             panel.Descriptor.ForceRebuild();

@@ -13,25 +13,38 @@ using Unity.Collections;
 using Unity.Collections.LowLevel.Unsafe;
 using Unity.Jobs;
 using Unity.Mathematics;
+using Unity.Profiling;
 using UnityEngine;
 using static SerializableBasis;
 [System.Serializable]
 public partial class BasisTransmissionResults
 {
+    // Phase markers for the transmit tick. AfterAvatarChanges shows one number for the whole
+    // tick; these split it so a spike attributes to the stage that owns it. The per-player
+    // branches (audio start/stop, avatar reload, LOD swap) are marked individually because
+    // they are the only work in the loop that can cost milliseconds on a single player —
+    // everything else in the loop is flag arithmetic and stays under the loop marker.
+    static readonly ProfilerMarker sMarkerFillPositions = new ProfilerMarker("BasisDriver.Network.Transmit.FillPositions");
+    static readonly ProfilerMarker sMarkerCompress = new ProfilerMarker("BasisDriver.Network.Transmit.Compress");
+    static readonly ProfilerMarker sMarkerJobComplete = new ProfilerMarker("BasisDriver.Network.Transmit.JobComplete");
+    static readonly ProfilerMarker sMarkerPostProcess = new ProfilerMarker("BasisDriver.Network.Transmit.PostProcess");
+    static readonly ProfilerMarker sMarkerAudioTransition = new ProfilerMarker("BasisDriver.Network.Transmit.AudioStartStop");
+    static readonly ProfilerMarker sMarkerAvatarReload = new ProfilerMarker("BasisDriver.Network.Transmit.ReloadAvatar");
+    static readonly ProfilerMarker sMarkerMeshLod = new ProfilerMarker("BasisDriver.Network.Transmit.ChangeMeshLOD");
+    static readonly ProfilerMarker sMarkerTalkingPoints = new ProfilerMarker("BasisDriver.Network.Transmit.TalkingPoints");
+
     // Jobs
     [System.NonSerialized] public BasisDistanceJobParallel distanceJob;
     [System.NonSerialized] public BasisDistanceReduceJob reduceJob;
     [System.NonSerialized] public BasisAvatarCapJob avatarCapJob;
     [System.NonSerialized] public BasisAudioCapJob audioCapJob;
     [System.NonSerialized] public BasisDirectionalDampenJob dampenJob;
-    [System.NonSerialized] public BasisViewConeAvatarJob viewConeJob;
 
     [System.NonSerialized] public JobHandle distanceJobHandle;
     [System.NonSerialized] public JobHandle reduceJobHandle;
     [System.NonSerialized] public JobHandle avatarCapJobHandle;
     [System.NonSerialized] public JobHandle audioCapJobHandle;
     [System.NonSerialized] public JobHandle dampenJobHandle;
-    [System.NonSerialized] public JobHandle viewConeJobHandle;
 
     // Timing / interval control
     public float intervalSeconds = 0.05f;
@@ -201,6 +214,7 @@ public partial class BasisTransmissionResults
         // Also pre-compute stickiness flags for the avatar cap so the
         // NativeArray sort never needs to touch managed objects.
         // Uses unsafe pointers to bypass NativeArray safety checks (~3ms savings at 1k players).
+        using (sMarkerFillPositions.Auto())
         unsafe
         {
             float3* pTargetPositions = (float3*)targetPositions.GetUnsafePtr();
@@ -213,6 +227,7 @@ public partial class BasisTransmissionResults
             {
                 BasisNetworkReceiver remote = snapshot[Index];
                 ushort id = remote.playerId;
+                var remotePlayer = remote.RemotePlayer;
 
                 if (RemoteBoneJobSystem.GetOutGoingMouth(id, out float3 outgoing))
                 {
@@ -222,8 +237,6 @@ public partial class BasisTransmissionResults
                 {
                     pTargetPositions[Index] = farAway;
                 }
-
-                var remotePlayer = remote.RemotePlayer;
                 pHasRealAvatar[Index] = remotePlayer.InAvatarRange && !remotePlayer.IsConsideredFallBackAvatar;
                 pHasActiveAudio[Index] = remote.AudioReceiverModule.HasAudioSource;
             }
@@ -302,27 +315,6 @@ public partial class BasisTransmissionResults
             audioCapJobHandle = distanceJobHandle;
         }
 
-        // View cone avatar job: filters AvatarRange to only show avatars in the
-        // direction the player is looking. Depends on distance + cap jobs.
-        if (SMModuleDistanceBasedReductions.UseViewConeAvatars)
-        {
-            float viewAngle = SMModuleDistanceBasedReductions.ViewConeAngle;
-            float halfConeRad = viewAngle * 0.5f * Mathf.Deg2Rad;
-            // 10° wider exit cone prevents flickering when camera wobbles near the boundary
-            float exitHalfConeRad = math.min(halfConeRad + 10f * Mathf.Deg2Rad, Mathf.PI);
-
-            viewConeJob.ListenerPosition = BasisLocalCameraDriver.Position;
-            viewConeJob.ListenerForward = BasisLocalCameraDriver.Forward();
-            viewConeJob.CosHalfCone = Mathf.Cos(halfConeRad);
-            viewConeJob.CosHalfConeExit = Mathf.Cos(exitHalfConeRad);
-
-            viewConeJobHandle = viewConeJob.Schedule(receiverCount, 64, avatarCapJobHandle);
-        }
-        else
-        {
-            viewConeJobHandle = avatarCapJobHandle;
-        }
-
         // Directional dampening job: only reads targetPositions (shared ReadOnly
         // with distance job) — no dependencies, runs in parallel with everything.
         float coneAngle = BasisSettingsDefaults.RAListenerConeAngle.RawValue;
@@ -346,11 +338,22 @@ public partial class BasisTransmissionResults
             dampenJobHandle = default;
         }
 
+        // Kick the batch. Schedule() only queues into the pending batch — nothing reaches a
+        // worker until something flushes it, and without this the first flush is the
+        // Complete() below. That made the Compress call under it pure serial latency ahead of
+        // a job chain that had not started: the main thread paid schedule + full chain +
+        // compress instead of overlapping the chain with compress. Several dependency stages deep
+        // (distance -> reduce/caps) at a full instance, that is the whole tick.
+        JobHandle.ScheduleBatchedJobs();
+
 #if UNITY_EDITOR
         if (_prof) { _psw.Stop(); BasisEventDriverProfilerData.Net_TransmitSim_JobScheduleMs = _psw.Elapsed.TotalMilliseconds; _psw.Restart(); }
 #endif
         // Do work that doesn't depend on distance results
-        BasisNetworkAvatarCompressor.Compress(BasisNetworkTransmitter, avatar.Animator, Time.timeAsDouble);
+        using (sMarkerCompress.Auto())
+        {
+            BasisNetworkAvatarCompressor.Compress(BasisNetworkTransmitter, avatar.Animator, Time.timeAsDouble);
+        }
 
 #if UNITY_EDITOR
         if (_prof)
@@ -361,12 +364,15 @@ public partial class BasisTransmissionResults
         }
 #endif
         // Finish before consuming results — single sync point via CombineDependencies
-        var combined = JobHandle.CombineDependencies(reduceJobHandle, viewConeJobHandle, audioCapJobHandle);
-        if (dampenEnabled)
+        using (sMarkerJobComplete.Auto())
         {
-            combined = JobHandle.CombineDependencies(combined, dampenJobHandle);
+            var combined = JobHandle.CombineDependencies(reduceJobHandle, avatarCapJobHandle, audioCapJobHandle);
+            if (dampenEnabled)
+            {
+                combined = JobHandle.CombineDependencies(combined, dampenJobHandle);
+            }
+            combined.Complete();
         }
-        combined.Complete();
 
 #if UNITY_EDITOR
         if (_prof)
@@ -427,6 +433,12 @@ public partial class BasisTransmissionResults
         bool jiggleColliderLodEnabled = BasisJiggleColliderLOD.Enabled;
         // Per-tick budget of avatar (re)loads admitted below; reset each tick. See MaxAvatarReloadsPerTick.
         int avatarReloadsAdmitted = 0;
+        // Per-tick budget of far LOD swaps — each swap forces a bone-job sync. Two ceilings:
+        // the count below, and a wall-clock budget opened here that bounds what those swaps are
+        // allowed to cost, since an install is a build plus a full remote calibration.
+        int farLodTransitionBudget = BasisAvatarFarLOD.MaxTransitionsPerTick;
+        BasisAvatarFarLOD.BeginTickBudget();
+        using (sMarkerPostProcess.Auto())
         unsafe
         {
             bool* pHearingRange = (bool*)hearingRange.GetUnsafeReadOnlyPtr();
@@ -448,15 +460,18 @@ public partial class BasisTransmissionResults
                 bool canHear = pHearingRange[i];
                 if (audio.HasAudioSource != canHear)
                 {
-                    if (canHear)
+                    using (sMarkerAudioTransition.Auto())
                     {
-                        audio.StartAudio(ConvertedVoiceDistance);
-                        remote.OutOfRangeFromLocal = false;
-                    }
-                    else
-                    {
-                        audio.StopAudio();
-                        remote.OutOfRangeFromLocal = true;
+                        if (canHear)
+                        {
+                            audio.StartAudio(ConvertedVoiceDistance);
+                            remote.OutOfRangeFromLocal = false;
+                        }
+                        else
+                        {
+                            audio.StopAudio();
+                            remote.OutOfRangeFromLocal = true;
+                        }
                     }
                 }
 
@@ -520,7 +535,10 @@ public partial class BasisTransmissionResults
                                 if (willReload)
                                 {
                                     avatarReloadsAdmitted++;
-                                    remote.ReloadAvatar();
+                                    using (sMarkerAvatarReload.Auto())
+                                    {
+                                        remote.ReloadAvatar();
+                                    }
                                 }
                             }
                         }
@@ -534,11 +552,28 @@ public partial class BasisTransmissionResults
 
                 if (lodChange && pMeshLodRange[i])
                 {
-                    remote.ChangeMeshLOD(pMeshLodLevel[i]);
+                    using (sMarkerMeshLod.Auto())
+                    {
+                        remote.ChangeMeshLOD(pMeshLodLevel[i]);
+                    }
                 }
 
                 // Update pose LOD from distance — independent of mesh LOD
                 remote.CurrentLodLevel = pMeshLodLevel[i];
+
+                // Far avatar stand-in upkeep (past avatar range, mid-download, platform
+                // missing). Edge-triggered; only actual swaps consume budget.
+                BasisAvatarFarLOD.Tick(remote, ref farLodTransitionBudget);
+
+                // Nameplate follows avatar range: past it the player is a far avatar (or the
+                // dummy) and the plate is too far to read. Inherits the range hysteresis
+                // and debounce.
+                bool plateVisible = remote.InAvatarRange;
+                if (plateVisible != remote.InNamePlateRange)
+                {
+                    remote.InNamePlateRange = plateVisible;
+                    remote.OnNamePlateActiveStateShouldRefresh?.Invoke();
+                }
 
                 // Distance-based jiggle collider reduction: trim a remote's arm/finger/foot
                 // colliders as it gets farther so distant crowds stop dominating the jiggle sim.
@@ -568,7 +603,10 @@ public partial class BasisTransmissionResults
         // Update who we are talking to (serialize without allocations)
         if (microphoneChange)
         {
-            BuildAndSendTalkingPoints(snapshot, receiverCount);
+            using (sMarkerTalkingPoints.Auto())
+            {
+                BuildAndSendTalkingPoints(snapshot, receiverCount);
+            }
             ForceVoiceRecipientResend = false;
         }
 #if UNITY_EDITOR
@@ -594,8 +632,6 @@ public partial class BasisTransmissionResults
         distanceJob.AvatarRange = AvatarRange;
         distanceJob.PrevInAvatarRange = PrevInAvatarRange;
         avatarCapJob.AvatarRange = AvatarRange;
-        viewConeJob.AvatarRange = AvatarRange;
-        viewConeJob.PrevInAvatarRange = PrevInAvatarRange;
 
         distanceJob.MeshLodLevel = MeshLodLevel;
         distanceJob.PrevMeshLodLevel = prevMeshLodLevel;
@@ -606,7 +642,10 @@ public partial class BasisTransmissionResults
         timer = math.max(0f, timer - intervalUsedThisTick);
     }
 
-    private void BuildAndSendTalkingPoints(IReadOnlyList<BasisNetworkReceiver> snapshot, int receiverCount)
+    // Takes the snapshot as its concrete array type, not IReadOnlyList: indexing an array
+    // through the interface goes out to the covariance stub per element instead of a bounds-
+    // checked load, and this walks every receiver in the instance on a recipient change.
+    private void BuildAndSendTalkingPoints(BasisNetworkReceiver[] snapshot, int receiverCount)
     {
         if (TalkingPoints.Capacity < receiverCount)
         {
@@ -870,10 +909,6 @@ public partial class BasisTransmissionResults
         audioCapJob.Entries = audioCapEntries;
         audioCapJob.StickinessBonus = 0.75f;
 
-        viewConeJob.TargetPositions = targetPositions;
-        viewConeJob.AvatarRange = AvatarRange;
-        viewConeJob.PrevInAvatarRange = PrevInAvatarRange;
-
         dampenJob.TargetPositions = targetPositions;
         dampenJob.Multipliers = directionalDampening;
 
@@ -929,7 +964,6 @@ public partial class BasisTransmissionResults
         if (!reduceJobHandle.IsCompleted) reduceJobHandle.Complete();
         if (!avatarCapJobHandle.IsCompleted) avatarCapJobHandle.Complete();
         if (!audioCapJobHandle.IsCompleted) audioCapJobHandle.Complete();
-        if (!viewConeJobHandle.IsCompleted) viewConeJobHandle.Complete();
         if (!dampenJobHandle.IsCompleted) dampenJobHandle.Complete();
 
         if (targetPositions.IsCreated) targetPositions.Dispose();

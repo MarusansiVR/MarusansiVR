@@ -50,16 +50,24 @@ public static class NetworkServer
     // Centralized NetDataWriter pool — single source of truth for all server code.
     // Capped so writers don't accumulate unboundedly after player count spikes.
     private static readonly ConcurrentQueue<NetDataWriter> _writerPool = new();
-    private const int MaxPooledWriters = 64;
+    // Depth follows the machine: this pool absorbs writers borrowed concurrently, and how many that
+    // is scales with how many threads can be in flight. A literal cap was too small on a large host
+    // (writers allocated instead of reused) and wasteful on a small one.
+    private static readonly int MaxPooledWriters = BasisCpuBudget.ConcurrencyWidth(perCore: 4, min: 32, max: 2048);
     public static NetDataWriter RentWriter(int initialCapacity = 208)
     {
         if (_writerPool.TryDequeue(out var writer)) return writer;
         return new NetDataWriter(true, initialCapacity);
     }
+    // Reset() only rewinds the cursor; the backing array keeps its high-water size forever. One
+    // oversized serialization (a join batch, a resource blob) would otherwise park a permanently
+    // inflated writer in the pool, and with enough of them the pool converges to
+    // MaxPooledWriters x largest-payload-ever. Oversized writers are dropped instead.
+    private const int MaxPooledWriterCapacity = 64 * 1024;
     public static void ReturnWriter(NetDataWriter writer)
     {
         writer.Reset();
-        if (_writerPool.Count < MaxPooledWriters)
+        if (writer.Capacity <= MaxPooledWriterCapacity && _writerPool.Count < MaxPooledWriters)
         {
             _writerPool.Enqueue(writer);
         }
@@ -115,6 +123,11 @@ public static class NetworkServer
             BNL.LogWarning($"NetworkServer.StopServer failed: {ex.Message}");
         }
         BasisNetworkUdpDropMonitor.Stop();
+        // StartServer builds a fresh AuthIdentity; without this the old one stays subscribed to
+        // the static OnAuthReceived event — pinned forever, and handling every auth packet twice.
+        // Left non-null so a straggling disconnect event can still resolve UUIDs while stopping.
+        try { AuthIdentity?.DeInitialize(); }
+        catch (Exception ex) { BNL.LogWarning($"AuthIdentity.DeInitialize failed: {ex.Message}"); }
         Server = null;
         Listener = null;
         AuthenticatedPeers.Clear();
@@ -123,6 +136,14 @@ public static class NetworkServer
 
     public static void InitializePulseSettings()
     {
+        BasisServerReductionSystemEvents.SetMaxDegreeOfParallelism(Configuration.BSRMaxDegreeOfParallelism);
+        int configuredMaxSockets = Basis.Network.Core.BasisTransportConfigStore
+            .Get<Basis.Network.Core.LNLTransportConfig>(
+                Basis.Network.Core.BasisNetworkStackRegistry.LiteNetLibId).MaxSendSockets;
+        // 0 = auto, derived from the core count. See BasisCpuBudget.AutoMaxSendSockets.
+        BasisServerReductionSystemEvents.MaxSendSockets = configuredMaxSockets > 0
+            ? configuredMaxSockets
+            : Basis.Network.Core.BasisCpuBudget.AutoMaxSendSockets;
         BasisServerReductionSystemEvents.BSRBaseMultiplier = Configuration.BSRBaseMultiplier;
         BasisServerReductionSystemEvents.BSRSMillisecondDefaultInterval = Configuration.BSRSMillisecondDefaultInterval;
         BasisServerReductionSystemEvents.BSRSIncreaseRate = Configuration.BSRSIncreaseRate;

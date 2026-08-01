@@ -78,6 +78,7 @@ public class BasisSeatSync : BasisNetworkBehaviour
         {
             Seat.OnInteractStartEvent.AddListener(OnInteractStartEvent);
             Seat.OnInteractEndEvent.AddListener(OnInteractEndEvent);
+            Seat.OnOccupantYawChanged += OnOccupantYawChanged;
         }
         else
         {
@@ -108,8 +109,39 @@ public class BasisSeatSync : BasisNetworkBehaviour
         }
     }
 
+    public const float YawSendIntervalSeconds = 0.05f;
+
+    private bool _yawDirty;
+    private float _lastYawSendTime = float.NegativeInfinity;
+
+    private void OnOccupantYawChanged(float yaw)
+    {
+        if (IsLocallyEntered())
+        {
+            _yawDirty = true;
+        }
+    }
+
+    public bool FlushOccupantYaw(float now)
+    {
+        if (_yawDirty == false || Seat == null || IsLocallyEntered() == false)
+        {
+            return false;
+        }
+        if (now - _lastYawSendTime < YawSendIntervalSeconds)
+        {
+            return false;
+        }
+        _yawDirty = false;
+        _lastYawSendTime = now;
+        SendCustomNetworkEvent(CreateSeatPacket(true), DeliveryMethod.ReliableOrdered);
+        return true;
+    }
+
     public void ProvideRemotePlayerTarget()
     {
+        FlushOccupantYaw(Time.unscaledTime);
+
         // If there is no seat, just clear any previous override.
         if (Seat == null)
         {
@@ -231,6 +263,7 @@ public class BasisSeatSync : BasisNetworkBehaviour
         {
             Seat.OnInteractStartEvent.RemoveListener(OnInteractStartEvent);
             Seat.OnInteractEndEvent.RemoveListener(OnInteractEndEvent);
+            Seat.OnOccupantYawChanged -= OnOccupantYawChanged;
         }
         base.OnDestroy();
     }
@@ -252,7 +285,6 @@ public class BasisSeatSync : BasisNetworkBehaviour
                 return;
             }
 
-            // If someone else is already in the seat, undo the speculative local sit.
             if (HasUser(out ushort current) && current != id)
             {
                 _applyingNetworkState = true;
@@ -267,7 +299,6 @@ public class BasisSeatSync : BasisNetworkBehaviour
                 return;
             }
 
-            // If we're already the recorded occupant, keep the fresh sit and re-assert the claim.
             if (IsLocallyEntered())
             {
                 _seatGen++;
@@ -328,12 +359,10 @@ public class BasisSeatSync : BasisNetworkBehaviour
 
     /// <summary>
     /// Apply state received from the network. Packet occupantId is the senderid, this is to lock it into coming from the right person.
-    /// Claims are arbitrated by generation, then lowest player id, so simultaneous sits converge on the same winner everywhere;
-    /// the loser is stood back up. Releases only apply when they come from the recorded occupant.
     /// </summary>
     public override void OnNetworkMessage(ushort occupantId, byte[] buffer, DeliveryMethod deliveryMethod)
     {
-        if (!DeserializeSeatPacket(buffer, out bool occupied, out uint gen, out bool hasGen))
+        if (!DeserializeSeatPacket(buffer, out bool occupied, out uint gen, out bool hasGen, out float yaw, out bool hasYaw))
         {
             return;
         }
@@ -379,6 +408,10 @@ public class BasisSeatSync : BasisNetworkBehaviour
                 _seatGen = gen;
                 StandIfPhysicallySeated();
                 SetSeatStateLocal(true, occupantId);
+                if (hasYaw && Seat != null)
+                {
+                    Seat.ApplyNetworkedOccupantYaw(yaw);
+                }
             }
             finally
             {
@@ -423,32 +456,62 @@ public class BasisSeatSync : BasisNetworkBehaviour
     }
 
     /// <summary>
-    /// Create a seat packet: [occupied(byte)][generation(uint32 LE)].
     /// </summary>
     public byte[] CreateSeatPacket(bool isInSeat)
     {
-        byte[] data = new byte[5];
+        byte[] data = new byte[7];
         data[0] = isInSeat ? (byte)1 : (byte)0;
         uint gen = _seatGen;
         data[1] = (byte)gen;
         data[2] = (byte)(gen >> 8);
         data[3] = (byte)(gen >> 16);
         data[4] = (byte)(gen >> 24);
+        short yaw = QuantizeYaw(Seat != null && isInSeat ? Seat.OccupantYawDegrees : 0f);
+        data[5] = (byte)yaw;
+        data[6] = (byte)(yaw >> 8);
         return data;
     }
 
+    private const float YawQuantizeScale = 32767f / 180f;
+
+    public static short QuantizeYaw(float degrees)
+    {
+        if (float.IsNaN(degrees) || float.IsInfinity(degrees))
+        {
+            return 0;
+        }
+        // Half-open wrap: DeltaAngle maps -180 to +180, which reads back as a 360 degree turn.
+        float wrapped = BasisSeatFit.WrapDegrees(degrees);
+        if (wrapped >= 180f)
+        {
+            wrapped -= 360f;
+        }
+        return (short)Mathf.Clamp(Mathf.RoundToInt(wrapped * YawQuantizeScale), short.MinValue, short.MaxValue);
+    }
+
+    public static float DequantizeYaw(short quantized) => quantized / YawQuantizeScale;
+
     /// <summary>
-    /// Set local state and update the Seat component (no networking here).
     /// </summary>
     private void SetSeatStateLocal(bool inSeat, ushort playerId)
     {
+        bool changed = LinkedPlayer.hasPlayerId != inSeat || LinkedPlayer.ThePlayerID != playerId;
+
         LinkedPlayer.hasPlayerId = inSeat;
         LinkedPlayer.ThePlayerID = playerId;
 
         if (Seat != null)
         {
             Seat.SetSeatOccupied(inSeat);
-            if (BasisNetworkPlayers.GetPlayerById(playerId, out BasisNetworkPlayer Player))
+            if (inSeat == false)
+            {
+                Seat.ResetOccupantYaw();
+            }
+
+            bool resolved = BasisNetworkPlayers.GetPlayerById(playerId, out BasisNetworkPlayer Player);
+            Seat.SetOccupantRecord(inSeat && resolved ? Player.Player : null);
+
+            if (changed && resolved)
             {
                 if (inSeat)
                 {
@@ -467,13 +530,14 @@ public class BasisSeatSync : BasisNetworkBehaviour
     }
 
     /// <summary>
-    /// Parse a seat packet. Returns false on malformed data.
     /// </summary>
-    private static bool DeserializeSeatPacket(byte[] buffer, out bool occupied, out uint gen, out bool hasGen)
+    private static bool DeserializeSeatPacket(byte[] buffer, out bool occupied, out uint gen, out bool hasGen, out float yaw, out bool hasYaw)
     {
         occupied = false;
         gen = 0;
         hasGen = false;
+        yaw = 0f;
+        hasYaw = false;
         if (buffer == null || buffer.Length < 1)
         {
             return false;
@@ -483,6 +547,11 @@ public class BasisSeatSync : BasisNetworkBehaviour
         {
             gen = (uint)(buffer[1] | (buffer[2] << 8) | (buffer[3] << 16) | (buffer[4] << 24));
             hasGen = true;
+        }
+        if (buffer.Length >= 7)
+        {
+            yaw = DequantizeYaw((short)(buffer[5] | (buffer[6] << 8)));
+            hasYaw = true;
         }
         return true;
     }

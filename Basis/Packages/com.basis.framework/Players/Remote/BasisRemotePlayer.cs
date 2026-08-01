@@ -51,6 +51,78 @@ namespace Basis.Scripts.BasisSdk.Players
         public byte AvatarLoadMode { get; set; }
         public BasisLoadableBundle AvatarMetaData { get; set; }
 
+        // 0 = unknown, 1 = present, -1 = absent or failed to build (don't retry every tick).
+        private sbyte _farLodPayloadState;
+
+        /// <summary>
+        /// Far avatar payload cached off the ORIGINAL bundle's connector — needed because
+        /// AvatarMetaData points at the loading-avatar bundle whenever the real avatar isn't
+        /// loaded (out of range, downloading, platform missing, failed).
+        /// </summary>
+        public string FarLodOverridePayload;
+        public string FarLodOverrideVersion;
+        /// <summary>Bee URL the override payload was captured from — detects avatar changes.</summary>
+        public string FarLodOverrideSource;
+        public bool FarLodConnectorFetchInFlight;
+        /// <summary>
+        /// True once the transmit tick has run the join-time representation pass for this
+        /// player. Out-of-range joiners get no range edge, so the tick fires one CreateAvatar
+        /// evaluation for them when this is still false.
+        /// </summary>
+        public bool FarLodInitialEvaluated;
+        /// <summary>Earliest time the transmit tick may retry a failed connector fetch.</summary>
+        public float FarLodNextFetchRetryTime;
+
+        /// <summary>
+        /// Drops the cached far avatar payload, e.g. when the player's avatar record changed
+        /// to a different bundle or the user hid this player.
+        /// </summary>
+        public void ClearFarLodStandIn()
+        {
+            FarLodOverridePayload = null;
+            FarLodOverrideVersion = null;
+            FarLodOverrideSource = null;
+            _farLodPayloadState = 0;
+        }
+
+        /// <summary>True while the player's CURRENT avatar is the runtime-built far avatar.</summary>
+        public bool IsFarLodActive => BasisAvatar != null && BasisAvatar.IsFarLodAvatar;
+
+        /// <summary>True when a far avatar payload is available for this player.</summary>
+        public bool HasFarLodPayload
+        {
+            get
+            {
+                if (!string.IsNullOrEmpty(FarLodOverridePayload))
+                {
+                    // -1 = the payload was tried and refused to build (corrupt/old bake)
+                    // — the player stays on their current avatar; don't re-parse every tick.
+                    return _farLodPayloadState != -1;
+                }
+                if (_farLodPayloadState == 0)
+                {
+                    string payload = AvatarMetaData?.BasisBundleConnector?.FarLodBase64;
+                    _farLodPayloadState = string.IsNullOrEmpty(payload) ? (sbyte)-1 : (sbyte)1;
+                }
+                return _farLodPayloadState == 1;
+            }
+        }
+
+        /// <summary>Latches the cached payload as unusable so builds aren't retried every tick.</summary>
+        public void MarkFarLodPayloadUnusable()
+        {
+            _farLodPayloadState = -1;
+        }
+
+        /// <summary>
+        /// Re-evaluates payload availability after a calibration — a recalibration may have
+        /// changed the avatar version the payload belongs to.
+        /// </summary>
+        public void ResetFarLodForNewAvatar()
+        {
+            _farLodPayloadState = 0;
+        }
+
         /// <summary>
         /// The remote player has no dedicated root object. The "Mouth" marker is a stable
         /// per-player transform (job-positioned, alive for the player's whole lifetime), so it
@@ -196,6 +268,14 @@ namespace Basis.Scripts.BasisSdk.Players
         /// Whether the remote player is within the range where avatar rendering is allowed.
         /// </summary>
         public bool InAvatarRange = true;
+
+        /// <summary>
+        /// Whether the remote player is close enough for their nameplate to be shown.
+        /// Updated by BasisTransmissionResults: false once the avatar has been distance-swapped
+        /// to the far LOD or the out-of-range fallback (the plate is too far to read and is
+        /// deactivated with it). Stand-in far LODs and nearby loading avatars keep the plate.
+        /// </summary>
+        public bool InNamePlateRange = true;
 
         /// <summary>
         /// Debounce state for avatar range transitions. View-cone and avatar-cap checks
@@ -432,7 +512,12 @@ namespace Basis.Scripts.BasisSdk.Players
                     AlwaysRequestedAvatar = BasisLoadedBundle;
                     AlwaysRequestedMode = CACM.loadMode;
 
-                    BasisAvatarFactory.RemoveOldAvatarAndLoadFallback(this,Vector3.zero, Quaternion.identity);
+                    BasisAvatarFactory.RemoveOldAvatarAndLoadFallback(this, Vector3.zero, Quaternion.identity);
+
+                    // The transmit tick re-evaluates once the job's distance is in: in range
+                    // the range edge loads the full avatar; out of range it runs one
+                    // CreateAvatar pass that starts the far avatar (or keeps the fallback).
+                    FarLodInitialEvaluated = false;
                 }
                 else
                 {
@@ -487,6 +572,7 @@ namespace Basis.Scripts.BasisSdk.Players
             }
             IsLoadingAnAvatar = true;
             BasisPlayerSettingsData BasisPlayerSettingsData = default;
+            bool farInstallPending = false;
             try
             {
                 // Fetch per-player visibility settings.
@@ -534,13 +620,75 @@ namespace Basis.Scripts.BasisSdk.Players
                 {
                     await BasisAvatarFactory.LoadAvatarRemote(this, Mode, BasisLoadableBundle, Vector3.zero, Quaternion.identity);
                 }
-                else if (!IsConsideredFallBackAvatar)
+                else
                 {
-                    BasisAvatarFactory.RemoveOldAvatarAndLoadFallback(this,Vector3.zero, Quaternion.identity);
+                    if (BasisPlayerSettingsData.AvatarVisible && !effectivelyBlocked)
+                    {
+                        // Real avatar won't be loaded (out of range, over the visible cap, or
+                        // performance-blocked) — stand in with the far LOD instead of the
+                        // loading dummy. The payload is a fixed small cost regardless of how
+                        // heavy the real avatar is, and for players whose bundle was never
+                        // downloaded only the connector is fetched — never the bundle.
+                        string source = BasisLoadableBundle?.BasisRemoteBundleEncrypted.RemoteBeeFileLocation;
+                        if (!string.IsNullOrEmpty(FarLodOverridePayload) && FarLodOverrideSource != source)
+                        {
+                            ClearFarLodStandIn();
+                        }
+                        if (BasisAvatarFarLOD.HasRealConnector(BasisLoadableBundle))
+                        {
+                            BasisAvatarFarLOD.CaptureFarLodFallback(this, BasisLoadableBundle);
+                        }
+                        else
+                        {
+                            // Network-converted bundles carry an EMPTY connector husk — a
+                            // null check would skip the fetch for every fresh joiner.
+                            BasisAvatarFarLOD.RequestFarLodPayload(this, BasisLoadableBundle);
+                        }
+
+                        // Never install from here: CreateAvatar runs on IO/task
+                        // continuations, where the remote-bone/jiggle pipelines can have
+                        // in-flight jobs — an install would mutate their transform arrays
+                        // mid-flight. Warm the payload parse on a worker and keep the
+                        // current avatar worn; the transmit tick swaps at its safe point,
+                        // normally the next pass. The loading dummy never appears.
+                        if (BasisAvatarFarLOD.WantsFarAvatarAfterLoad(this))
+                        {
+                            BasisFarAvatarBuilder.PrewarmParse(this);
+                            farInstallPending = true;
+                        }
+                    }
+                    else
+                    {
+                        // Hidden or blocked — never represent this player with a far LOD.
+                        ClearFarLodStandIn();
+                    }
+                    // The desired far avatar stays put (it is fallback-classed); a real
+                    // avatar, a player wearing nothing at all, or a far avatar that is no
+                    // longer wanted (hidden, blocked, far system disabled, payload refused,
+                    // or a version swap that failed to build — any of these left worn makes
+                    // the tick's !wantsFar-while-wearing reload churn forever) drops to the
+                    // dummy. When a newer request queued behind this one, leave the worn
+                    // avatar alone — the rerun re-decides, and flashing the dummy in between
+                    // is the hop this skips.
+                    bool farStillWanted = BasisPlayerSettingsData.AvatarVisible && !effectivelyBlocked &&
+                        BasisAvatarFarLOD.WantsFarAvatarAfterLoad(this);
+                    bool wearingUnwantedFarAvatar = BasisAvatar != null && BasisAvatar.IsFarLodAvatar && !farStillWanted;
+                    bool dropToDummy = !IsConsideredFallBackAvatar || BasisAvatar == null || wearingUnwantedFarAvatar;
+                    if ((farInstallPending && BasisAvatar != null) || (_reloadQueuedDuringLoad && BasisAvatar != null))
+                    {
+                        dropToDummy = false;
+                    }
+                    if (dropToDummy)
+                    {
+                        BasisAvatarFactory.RemoveOldAvatarAndLoadFallback(this,Vector3.zero, Quaternion.identity);
+                    }
                 }
 
                 if (BasisAvatar != null)
                 {
+                    // Avatar GameObjects are never toggled for the far avatar swap — while a
+                    // stand-in fronts this player, the fallback stays ACTIVE with its renderers
+                    // Active state only tracks blocking — representation swaps replace the avatar.
                     bool shouldBeActive = !effectivelyBlocked;
                     if (BasisAvatar.gameObject.activeSelf != shouldBeActive)
                     {
@@ -573,10 +721,12 @@ namespace Basis.Scripts.BasisSdk.Players
             }
 
             // If state drifted during the load, re-evaluate immediately.
-            // Otherwise set cooldown to prevent oscillation.
+            // Otherwise set cooldown to prevent oscillation. A pending far install keeps the
+            // real avatar up on purpose — the transmit tick owns that swap; re-running here
+            // would churn CreateAvatar every pass until the tick wins.
             bool effectiveInRange = InAvatarRange || AlwaysShowAvatar;
             bool stateMismatch = (effectiveInRange && IsConsideredFallBackAvatar) || (!effectiveInRange && !IsConsideredFallBackAvatar);
-            if (stateMismatch)
+            if (stateMismatch && !farInstallPending)
             {
                 ReloadAvatar();
             }

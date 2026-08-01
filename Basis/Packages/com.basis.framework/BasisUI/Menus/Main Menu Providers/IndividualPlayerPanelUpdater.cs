@@ -17,7 +17,19 @@ namespace Basis.BasisUI
         public PanelElementDescriptor RangesField;
         public PanelElementDescriptor BufferField;
         public PanelElementDescriptor DirectConnPingField;
+        [System.NonSerialized] public BasisPanelTint.Handle DirectConnPingTint;
+        public RectTransform DirectConnRebuildFrom;
+        public RectTransform DirectConnRebuildStopAt;
         private bool _pingVisible;
+        private BasisPanelSeverity _pingSeverity;
+
+        /// <summary>
+        /// Direct-link round trip at which the ping card warns, then reads hot. Same thresholds the
+        /// network settings tab grades the server ping with, so a P2P link and the server relay are
+        /// judged by the same bar.
+        /// </summary>
+        private const int PingCautionRtt = 120;
+        private const int PingHotRtt = 250;
 
         // Audio debug fields
         public PanelElementDescriptor AudioSourceField;
@@ -66,30 +78,45 @@ namespace Basis.BasisUI
             AvatarMetaField?.DisableRichText();
         }
 
+        /// <summary>
+        /// Freezes one field, but only once it is on screen. A field on a tab the user has not
+        /// opened is inactive with no measured height, so freezing there pins it to the fallback
+        /// minimum and clips the real content later. Returns false to ask for another attempt.
+        /// </summary>
+        private static bool FreezeField(PanelElementDescriptor field, float minHeight)
+        {
+            if (field == null) return true;
+            if (!field.gameObject.activeInHierarchy) return false;
+            field.FreezeLayoutSize(minHeight);
+            return true;
+        }
+
         private void FreezeLayoutOnce()
         {
             if (_layoutFrozen) return;
-            _layoutFrozen = true;
+
             // Freeze each field's natural layout size once content has settled so
             // the per-frame SetDescription calls don't cascade layout rebuilds up
             // through the individual player panel's parent LayoutGroups.
-            DebugField?.FreezeLayoutSize(130f);
-            DistanceField?.FreezeLayoutSize(90f);
-            LodField?.FreezeLayoutSize(90f);
-            RangesField?.FreezeLayoutSize(110f);
-            BufferField?.FreezeLayoutSize(130f);
+            bool frozen = true;
+            frozen &= FreezeField(DebugField, 130f);
+            frozen &= FreezeField(DistanceField, 90f);
+            frozen &= FreezeField(LodField, 90f);
+            frozen &= FreezeField(RangesField, 110f);
+            frozen &= FreezeField(BufferField, 130f);
             // DirectConnPingField intentionally not frozen — it toggles SetActive
             // based on P2P connection state, and freezing pins height even when hidden.
-            AudioSourceField?.FreezeLayoutSize(140f);
-            VolumeChainField?.FreezeLayoutSize(130f);
-            DecodedBufferField?.FreezeLayoutSize(120f);
-            EncodedBufferField?.FreezeLayoutSize(140f);
-            SilenceField?.FreezeLayoutSize(90f);
-            VisemeField?.FreezeLayoutSize(90f);
-            AvatarReceiveField?.FreezeLayoutSize(120f);
-            AvatarStagingField?.FreezeLayoutSize(140f);
-            AvatarInterpField?.FreezeLayoutSize(140f);
-            AvatarMetaField?.FreezeLayoutSize(170f);
+            frozen &= FreezeField(AudioSourceField, 140f);
+            frozen &= FreezeField(VolumeChainField, 130f);
+            frozen &= FreezeField(DecodedBufferField, 120f);
+            frozen &= FreezeField(EncodedBufferField, 140f);
+            frozen &= FreezeField(SilenceField, 90f);
+            frozen &= FreezeField(VisemeField, 90f);
+            frozen &= FreezeField(AvatarReceiveField, 120f);
+            frozen &= FreezeField(AvatarStagingField, 140f);
+            frozen &= FreezeField(AvatarInterpField, 140f);
+            frozen &= FreezeField(AvatarMetaField, 170f);
+            _layoutFrozen = frozen;
         }
 
         private void Update()
@@ -139,9 +166,9 @@ namespace Basis.BasisUI
             // Find this player's index in the receivers snapshot
             if (results == null || results.LengthOfArrays <= 0)
             {
-                if (DistanceField != null) DistanceField.SetDescription("No data");
-                if (LodField != null) LodField.SetDescription("No data");
-                if (RangesField != null) RangesField.SetDescription("No data");
+                if (DistanceField != null) DistanceField.SetDescription(BasisLocalization.Get("menu.players.panel.noData"));
+                if (LodField != null) LodField.SetDescription(BasisLocalization.Get("menu.players.panel.noData"));
+                if (RangesField != null) RangesField.SetDescription(BasisLocalization.Get("menu.players.panel.noData"));
                 UpdateBufferField();
                 UpdateAudioDebugFields();
                 UpdateAvatarDataDebugFields();
@@ -151,9 +178,9 @@ namespace Basis.BasisUI
             // Look up the receiver for this remote player
             if (!BasisNetworkPlayers.PlayerToNetworkedPlayer(RemotePlayer, out var netPlayer))
             {
-                if (DistanceField != null) DistanceField.SetDescription("Player not found");
-                if (LodField != null) LodField.SetDescription("Player not found");
-                if (RangesField != null) RangesField.SetDescription("Player not found");
+                if (DistanceField != null) DistanceField.SetDescription(BasisLocalization.Get("menu.players.panel.playerNotFound"));
+                if (LodField != null) LodField.SetDescription(BasisLocalization.Get("menu.players.panel.playerNotFound"));
+                if (RangesField != null) RangesField.SetDescription(BasisLocalization.Get("menu.players.panel.playerNotFound"));
                 UpdateBufferField();
                 UpdateAudioDebugFields();
                 UpdateAvatarDataDebugFields();
@@ -176,9 +203,9 @@ namespace Basis.BasisUI
 
             if (playerIndex < 0)
             {
-                if (DistanceField != null) DistanceField.SetDescription("Not in snapshot");
-                if (LodField != null) LodField.SetDescription("Not in snapshot");
-                if (RangesField != null) RangesField.SetDescription("Not in snapshot");
+                if (DistanceField != null) DistanceField.SetDescription(BasisLocalization.Get("menu.players.panel.notInSnapshot"));
+                if (LodField != null) LodField.SetDescription(BasisLocalization.Get("menu.players.panel.notInSnapshot"));
+                if (RangesField != null) RangesField.SetDescription(BasisLocalization.Get("menu.players.panel.notInSnapshot"));
                 UpdateBufferField();
                 UpdateAudioDebugFields();
                 UpdateAvatarDataDebugFields();
@@ -266,17 +293,37 @@ namespace Basis.BasisUI
                 shouldShow = BasisP2PManager.TryGetP2PRoundTripTime(net.playerId, out rttMs);
             }
 
-            if (shouldShow)
-            {
-                DirectConnPingField.SetDescription(
-                    BasisLocalization.Get("menu.individualPlayer.directConnection.ping.value", rttMs));
-            }
-
+            // Toggle visibility first: a tween started on a disabled object never ticks, so the
+            // grade below has to run against a card that is already on screen.
             if (shouldShow != _pingVisible)
             {
                 _pingVisible = shouldShow;
                 DirectConnPingField.SetActive(shouldShow);
-                PanelDescriptor?.ForceRebuild();
+                if (!shouldShow)
+                {
+                    _pingSeverity = BasisPanelSeverity.None;
+                    BasisPanelTint.Apply(DirectConnPingTint, BasisPanelSeverity.None, false);
+                }
+
+                // Rebuilding the panel root measures this group before the group has resized
+                // itself, so the row is revealed but nothing below it moves.
+                if (DirectConnRebuildFrom != null)
+                {
+                    PanelElementDescriptor.RebuildLayoutChain(DirectConnRebuildFrom, DirectConnRebuildStopAt);
+                }
+                else
+                {
+                    PanelDescriptor?.ForceRebuild();
+                }
+            }
+
+            if (shouldShow)
+            {
+                DirectConnPingField.SetDescription(
+                    BasisLocalization.Get("menu.individualPlayer.directConnection.ping.value", rttMs));
+
+                _pingSeverity = BasisPanelTint.Grade(rttMs, PingCautionRtt, PingHotRtt, _pingSeverity);
+                BasisPanelTint.Apply(DirectConnPingTint, _pingSeverity);
             }
         }
 
@@ -286,7 +333,7 @@ namespace Basis.BasisUI
 
             if (RemotePlayer == null || RemotePlayer.NetworkReceiver == null)
             {
-                BufferField.SetDescription("No receiver");
+                BufferField.SetDescription(BasisLocalization.Get("menu.players.panel.noReceiver"));
                 return;
             }
 

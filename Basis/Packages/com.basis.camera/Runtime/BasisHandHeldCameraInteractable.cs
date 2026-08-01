@@ -14,7 +14,7 @@ using Basis.Scripts.TransformBinders.BoneControl;
 /// - Provides a desktop “fly” mode with smoothed movement/rotation, momentum, and auto-leveling
 /// - Locks/unlocks player controls while interacting
 /// </summary>
-public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
+public abstract partial class BasisHandHeldCameraInteractable : BasisPickupInteractable
 {
     /// <summary>Owning handheld camera component and metadata.</summary>
     public BasisHandHeldCamera HHC;
@@ -721,12 +721,7 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
         CanSelfSteal = false;
 
         // Desktop: lock player look/move for UI selection
-        string className = nameof(BasisHandHeldCameraInteractable);
-        bool inDesktop = BasisDeviceManagement.IsUserInDesktop();
-        if (inDesktop)
-            LockPlayer(className);
-
-        BasisCursorManagement.UnlockCursor(nameof(BasisHandHeldCamera),false);
+        AcquireCursorLock();
 
         if (HHC.captureCamera == null)
         {
@@ -749,8 +744,8 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
         // scale camera to avatar size
         ApplyCameraScale();
 
-        // run after player movement
-        BasisLocalPlayer.AfterSimulateOnLate.AddAction(202, UpdateCamera);
+        // run after player movement and after every device transform has been applied
+        BasisLocalPlayer.AfterSimulateOnRender.AddAction(202, UpdateCamera);
 
         cameraPinConstraint = new BasisParentConstraint
         {
@@ -759,6 +754,8 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
         };
 
         flyCamera = new BasisFlyCamera();
+
+        InitializeCinematics();
     }
 
     /// <summary>Assigns the UI instance so orientation changes can be reflected.</summary>
@@ -797,7 +794,7 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
 
         bool inDesktop = BasisDeviceManagement.IsUserInDesktop();
         CheckCameraOrientation();
-        ApplyCameraScale();
+        TickDollyTrack();
 
         if (inDesktop)
         {
@@ -805,9 +802,7 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
 
             flyCamera.DetectInput();
 
-            BasisCalibratedCoords Coords = Inputs.desktopCenterEye.BoneControl.OutgoingWorldData;
-            Vector3 inPos = Coords.position;
-            Quaternion inRot = Coords.rotation;
+            Inputs.desktopCenterEye.Source.transform.GetPositionAndRotation(out Vector3 inPos, out Quaternion inRot);
 
             if (BasisLocalCameraDriver.HasInstance)
             {
@@ -848,6 +843,8 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
             // VR mode: handle fly mode toggle and controller input
             PollVRControl();
         }
+
+        ApplyCameraScale();
 
         // Update pinning regardless of desktop/head-constraint logic
         PollCameraPin(Inputs.desktopCenterEye.Source);
@@ -1141,6 +1138,37 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
         isPlayerManuallyUnlocked = false;
     }
 
+    /// <summary>
+    /// Takes the camera's cursor-unlock request and, on desktop, its look/move locks, so the
+    /// panel is clickable. Paired with <see cref="ReleaseCursorLock"/>.
+    /// </summary>
+    public void AcquireCursorLock()
+    {
+        if (BasisDeviceManagement.IsUserInDesktop())
+        {
+            LockPlayer(nameof(BasisHandHeldCameraInteractable));
+        }
+
+        BasisCursorManagement.UnlockCursor(nameof(BasisHandHeldCamera), false);
+    }
+
+    /// <summary>
+    /// Drops the camera's cursor-unlock request. If someone else still wants the cursor free —
+    /// the main menu, most often — the cursor stays free and look has to stay blocked with it,
+    /// which is what the camera's own look lock was doing until it was released. Without this
+    /// the cursor is loose and mouse-look is live at the same time, so navigating the settings
+    /// UI spins the player.
+    /// </summary>
+    public void ReleaseCursorLock()
+    {
+        BasisCursorManagement.LockCursor(nameof(BasisHandHeldCamera));
+
+        if (BasisDeviceManagement.IsUserInDesktop() && Cursor.lockState != CursorLockMode.Locked)
+        {
+            LookLock.Add(nameof(BasisCursorManagement));
+        }
+    }
+
     /// <summary>Applies look/move locks to the player (desktop).</summary>
     private void LockPlayer(string className)
     {
@@ -1171,6 +1199,12 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
         {
             smoothedPosition = pipPos;
             smoothedRotation = pipRot;
+            return;
+        }
+
+        if (cinematicEnabled)
+        {
+            MoveCameraCinematic(deltaTime);
             return;
         }
 
@@ -1466,7 +1500,7 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
         OnInteractStartEvent.RemoveListener(OnInteractDesktopTweak);
         BasisLocalPlayer.OnPlayersHeightChangedNextFrame -= OnHeightChanged;
 
-        BasisLocalPlayer.AfterSimulateOnLate.RemoveAction(202, UpdateCamera);
+        BasisLocalPlayer.AfterSimulateOnRender.RemoveAction(202, UpdateCamera);
 
         if (pauseMove || isVRFlying)
         {
@@ -1485,7 +1519,9 @@ public abstract class BasisHandHeldCameraInteractable : BasisPickupInteractable
             flyCamera.OnDestroy();
         }
 
-        BasisCursorManagement.LockCursor(nameof(BasisHandHeldCamera));
+        DisposeCinematics();
+
+        ReleaseCursorLock();
         base.OnDestroy();
     }
 }

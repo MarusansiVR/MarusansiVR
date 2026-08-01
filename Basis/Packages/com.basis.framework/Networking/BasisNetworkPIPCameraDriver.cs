@@ -80,7 +80,8 @@ public static class BasisNetworkPIPCameraDriver
     private const float LerpSpeed = 12f;
 
     /// <summary>
-    /// Priority for AfterSimulateOnLate. Runs after the hand-held camera interactable (202).
+    /// Priority for AfterSimulateOnLate. Interpolates remote pucks only, so it does not depend on
+    /// the local hand-held camera, which moves in the render phase.
     /// </summary>
     private const int SimulatePriority = 203;
 
@@ -176,6 +177,18 @@ public static class BasisNetworkPIPCameraDriver
 
         pipHandle.Complete();
         ClearRemotePIPsInternal();
+    }
+
+    /// <summary>
+    /// Joins any in-flight PIP transform jobs. Simulate is the steady-state fence but only
+    /// runs while the local player is ready; the event driver calls this on not-ready frames
+    /// so the jobs never span a frame boundary with pucks free to be destroyed under them.
+    /// </summary>
+    public static void CompletePending()
+    {
+        if (!initialized) return;
+
+        pipHandle.Complete();
     }
 
     public static void ApplyPipNamePlateSettingsFromUI()

@@ -163,8 +163,10 @@ public class JiggleJobs {
         _memoryBus.Dispose();
     }
 
+    private bool accessArraysDesynced;
+
     public JobHandle SchedulePoses(double timeAsDouble) {
-        if (_memoryBus.transformCount == 0) {
+        if (_memoryBus.transformCount == 0 || accessArraysDesynced) {
             return default;
         }
         jobBulkTransformReset.UpdateArrays(_memoryBus);
@@ -205,6 +207,15 @@ public class JiggleJobs {
         if (hasHandleTransformWrite) {
             handleTransformWrite.Complete();
         }
+        // The first-pose branch in SchedulePoses schedules the reset with no dependency
+        // edge back into the write chain, so join the earlier pose stages explicitly
+        // rather than relying on transitivity. No-ops when already covered.
+        if (hasHandleRootRead) {
+            handleRootRead.Complete();
+        }
+        if (hasHandleBulkReset) {
+            handleBulkReset.Complete();
+        }
     }
 
     public void FreeOnComplete(IntPtr pointer) {
@@ -238,6 +249,11 @@ public class JiggleJobs {
     }
 
     public void Simulate(double simulateTime, double realTime, int substeps, JobHandle externalDependency = default) {
+        // CommitTrees/CommitColliders (and the buffer rotation below) mutate the transform
+        // access arrays and buffers the pose chain is scheduled over. The host's pose fence
+        // can be skipped on an exception frame, and hosts may call ScheduleSimulate between
+        // SchedulePoses and CompletePose — join the pose chain first. No-op on healthy frames.
+        CompletePoses();
         if (_memoryBus.transformCount == 0) {
             _memoryBus.CommitTrees();
             _memoryBus.CommitColliders();
@@ -281,6 +297,15 @@ public class JiggleJobs {
         _memoryBus.CommitTrees();
         _memoryBus.CommitColliders();
         Profiler.EndSample();
+
+        // A bone destroyed while still enrolled shifts every later slot of the access arrays, so
+        // until the commit rebuilds them the slot indexing the pose buffers use is wrong and every
+        // transform job would cross avatar boundaries. Sitting the frame out costs a frame of
+        // jiggle; scheduling over it poses one player's bones from another player's tree.
+        accessArraysDesynced = _memoryBus.GetAccessArraysDesynced();
+        if (accessArraysDesynced) {
+            return;
+        }
 
         jobSimulate.UpdateArrays(_memoryBus);
         jobSimulate.substeps = substeps;

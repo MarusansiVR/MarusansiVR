@@ -356,6 +356,10 @@ namespace Basis.Scripts.Networking
 #endif
             BasisRemoteNetworkDriver.Apply(); // completes interpolation job
             BasisRemoteNetworkDriver.BeginRead();
+            // Interpolation output is readable from here, and the skeleton compose depends on
+            // nothing the receiver loop below writes — kicking it now runs it ACROSS that loop
+            // instead of leaving the workers parked until Schedule() at the bottom.
+            RemoteBoneJobSystem.ScheduleSkeletonCompute();
 #if UNITY_EDITOR
             if (p)
             {
@@ -422,6 +426,9 @@ namespace Basis.Scripts.Networking
                 if (skipPtr != null && receiver.playerId < BasisRemoteNetworkDriver.FixedCapacity) skipPtr[receiver.playerId] = 0;
                 if (endEffectorIK) receiver.WriteEffectorJobInputs();
             }
+            // The loop above is the last writer of the filtered hips overrides this job reads, so
+            // this is the earliest legal kick. Everything after it was main-thread latency.
+            RemoteBoneJobSystem.ScheduleHipsDerive();
 #if UNITY_EDITOR
             if (p)
             {
@@ -526,59 +533,6 @@ namespace Basis.Scripts.Networking
             peer.Send(payload, BasisNetworkCommons.ServerBoundChannel, mode);
             BasisNetworkProfiler.AddToCounter(BasisNetworkProfilerCounter.SceneData, payload.Length);
         }
-
-        /// <summary>
-        /// Sends a database item to the server for storage.
-        /// </summary>
-        /// <param name="DatabaseID">The ID of the database entry.</param>
-        /// <param name="jsonPayload">Key/value data for the item.</param>
-        public static void SendServerSideDatabaseItem(string DatabaseID, ConcurrentDictionary<string, object> jsonPayload)
-        {
-            var peer = LocalPlayerPeer;
-            if (peer == null)
-            {
-                BasisDebug.LogError("Local NetPeer was null!", BasisDebug.LogTag.Networking);
-                return;
-            }
-
-            DatabasePrimativeMessage databasePrimativeMessage = new DatabasePrimativeMessage
-            {
-                Name = DatabaseID,
-                jsonPayload = jsonPayload
-            };
-
-            NetDataWriter netDataWriter = new NetDataWriter();
-            databasePrimativeMessage.Serialize(netDataWriter);
-            BasisNetworkConnection.LocalPlayerPeer.Send(netDataWriter, BasisNetworkCommons.RequestStoreDatabaseChannel, DeliveryMethod.ReliableOrdered);
-        }
-
-        /// <summary>
-        /// Requests a database item from the server by ID.
-        /// </summary>
-        /// <param name="DatabaseID">The ID of the requested database entry.</param>
-        public static void RequestServerSideDatabaseItem(string DatabaseID)
-        {
-            var peer = LocalPlayerPeer;
-            if (peer == null)
-            {
-                BasisDebug.LogError("Local NetPeer was null!", BasisDebug.LogTag.Networking);
-                return;
-            }
-
-            DataBaseRequest DataBaseRequest = new DataBaseRequest
-            {
-                DatabaseID = DatabaseID
-            };
-
-            NetDataWriter netDataWriter = new NetDataWriter();
-            DataBaseRequest.Serialize(netDataWriter);
-            BasisNetworkConnection.LocalPlayerPeer.Send(netDataWriter, BasisNetworkCommons.RequestStoreDatabaseChannel, DeliveryMethod.ReliableOrdered);
-        }
-
-        /// <summary>
-        /// Event fired when a server-side database item is returned.
-        /// </summary>
-        public static Action<DatabasePrimativeMessage> OnRequestServerSideDatabaseItem;
 
         #endregion
 

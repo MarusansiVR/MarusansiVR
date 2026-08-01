@@ -9,6 +9,19 @@ public class BasisTrackedBundleWrapper
     public BasisLoadableBundle LoadableBundle;
     [SerializeField]
     public AssetBundle AssetBundle;
+    /// <summary>
+    /// Generic (glTF) content loads produce a hidden template instance instead of an
+    /// AssetBundle: an inactive DontDestroyOnLoad holder owning the imported avatar with its
+    /// rebuilt humanoid rig and wired BasisAvatar. Clones are instantiated from the template
+    /// the same way prefabs are instantiated from a bundle. Disposing the GltfImport destroys
+    /// the meshes/textures/materials it created — the glTF analog of AssetBundle.Unload(true).
+    /// </summary>
+    public GameObject GltfTemplateHolder;
+    public GameObject GltfTemplateAvatarRoot;
+    [System.NonSerialized]
+    public GLTFast.GltfImport GltfImport;
+    public UnityEngine.Avatar GltfBuiltAvatar;
+    public bool HasGltfTemplate => GltfTemplateAvatarRoot != null;
     #if UNITY_BUNDLEUNLOAD
     [SerializeField]
     public bool IsBundleBackingStoreReleased = false;
@@ -16,6 +29,13 @@ public class BasisTrackedBundleWrapper
     private int _requestedTimes = 0;
     public bool IsInUse => Volatile.Read(ref _requestedTimes) > 0;
     public bool DidErrorOccur = false;
+    /// <summary>
+    /// Set the moment Unload(true) destroys this wrapper's assets. The wrapper can outlive
+    /// the unload in the registry for a continuation gap — lookups must treat a flagged
+    /// wrapper as a MISS (drop it, load fresh), never instantiate from it.
+    /// </summary>
+    [System.NonSerialized]
+    public volatile bool IsUnloaded;
     public static TimeSpan TimeSpan = TimeSpan.FromSeconds(BasisBeeConstants.TimeUntilMemoryRemoval);
     /// <summary>
     /// for example this is the scene path. we can use this to see 
@@ -38,18 +58,43 @@ public class BasisTrackedBundleWrapper
     // Method to check if the bundle is fully loaded
     private bool IsBundleCompleteAndLoaded()
     {
-        // You can implement your actual logic to check if the bundle is loaded here
-        return AssetBundle != null; // Assuming AssetBundle being non-null means it's loaded
+        // Either backing store counts as loaded: an AssetBundle or a generic glTF template.
+        return AssetBundle != null || HasGltfTemplate;
     }
 
+    /// <summary>
+    /// Tears down generic (glTF) content: the template hierarchy, the runtime-built humanoid
+    /// Avatar asset, and the import (which destroys the meshes/textures/materials it created).
+    /// Safe to call when nothing was loaded.
+    /// </summary>
+    public void UnloadGltfTemplate()
+    {
+        if (GltfTemplateHolder != null)
+        {
+            UnityEngine.Object.Destroy(GltfTemplateHolder);
+            GltfTemplateHolder = null;
+        }
+        GltfTemplateAvatarRoot = null;
+        if (GltfBuiltAvatar != null)
+        {
+            UnityEngine.Object.Destroy(GltfBuiltAvatar);
+            GltfBuiltAvatar = null;
+        }
+        if (GltfImport != null)
+        {
+            GltfImport.Dispose();
+            GltfImport = null;
+        }
+    }
 
     // TODO: Bug in here
     // when loading in multiple same scenes and unloading one of them
     // it will remove other duplicate scenes?
     public async Task<bool> UnloadIfReady()
     {
+        bool isGltfContent = HasGltfTemplate || GltfImport != null;
         #if !UNITY_SERVER
-        if (AssetBundle == null)
+        if (AssetBundle == null && !isGltfContent)
         {
             BasisDebug.LogError("Asset Bundle was null this should never occur");
             return false;
@@ -60,6 +105,13 @@ public class BasisTrackedBundleWrapper
             await Task.Delay(TimeSpan);
             if (Volatile.Read(ref _requestedTimes) <= 0)
             {
+                if (isGltfContent)
+                {
+                    BasisDebug.Log("Unloading generic (glTF) template " + (GltfTemplateHolder != null ? GltfTemplateHolder.name : "<destroyed>"));
+                    IsUnloaded = true;
+                    UnloadGltfTemplate();
+                    return true;
+                }
                 if (AssetBundle == null)
                 {
                     #if UNITY_BUNDLEUNLOAD
@@ -73,6 +125,12 @@ public class BasisTrackedBundleWrapper
                     return false;
                 }
                 BasisDebug.Log("Unloading Bundle " + AssetBundle.name);
+                // Flagged BEFORE the unload: the wrapper stays in the registry until the
+                // caller's continuation removes it, and a lookup in that gap must see a dead
+                // wrapper, not a loadable one — Unload(true) destroys every asset instances
+                // depend on (an instantiate from this wrapper afterwards produces an avatar
+                // whose Animator.avatar is null).
+                IsUnloaded = true;
                 AssetBundle.Unload(true);
                 #if UNITY_BUNDLEUNLOAD
                 AssetBundle = null;

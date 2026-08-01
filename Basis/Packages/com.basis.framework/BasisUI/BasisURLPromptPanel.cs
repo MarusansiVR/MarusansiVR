@@ -60,6 +60,10 @@ namespace Basis.BasisUI
             // to the notification center as a pending entry that can be brought back up.
             CloseButton.OnClicked += () => ReleaseInstance();
             OnInstanceReleased += CaptureIfUnresolved;
+
+            // A load request may have forced the menu open, which tore down the page and
+            // virtual keyboard the user had up; put them back now the prompt is done.
+            OnInstanceReleased += BasisMenuPromptRestore.RestoreAfterPrompt;
         }
 
         public void Setup(string url, Action<LoadResponse> callback)
@@ -69,7 +73,14 @@ namespace Basis.BasisUI
             URLTextField._inputField.text = url;
             URLTextField._inputField.interactable = false;
 
-            ScopeDropdown.AssignEntries(new List<string> { "URL", "Hostname", "Base Domain" });
+            // An unsolicited request to fetch something off the network, raised by world content
+            // rather than by the user. Caution reads it the same way the settings cards read a
+            // stat that wants a look before it is waved through.
+            BasisPanelTint.Apply(BasisPanelTint.Capture(Descriptor), BasisPanelSeverity.Caution, false);
+
+            ScopeDropdown.AssignLocalizedEntries(
+                new List<string> { "URL", "Hostname", "Base Domain" },
+                new List<string> { "settings.urlPrompt.scope.url", "settings.urlPrompt.scope.hostname", "settings.urlPrompt.scope.baseDomain" });
             ScopeDropdown.SetValue("URL");
             ScopeDropdown.gameObject.SetActive(false);
         }

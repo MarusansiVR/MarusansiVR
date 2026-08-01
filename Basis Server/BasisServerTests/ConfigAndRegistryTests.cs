@@ -156,9 +156,6 @@ public class ServerConfigurationDefaultsTests
         Assert.Equal(10667, cfg.ApiPort);
         Assert.Equal("", cfg.ApiKey);
         Assert.True(cfg.CrashReportingEnabled);
-        Assert.Equal(10000, cfg.MaxDatabaseEntries);
-        Assert.Equal(256, cfg.MaxDatabaseNameLength);
-        Assert.Equal(1000, cfg.MaxDatabasePayloadEntries);
         Assert.Equal(32, cfg.MaxContentSpheresPerPlayer);
     }
 
@@ -311,8 +308,15 @@ public class TransportConfigStoreTests
     public void LnlTransportConfig_Defaults()
     {
         var cfg = new LNLTransportConfig();
-        Assert.Equal(2, LNLTransportConfig.CurrentConfigVersion);
+        // 7: added MergeHoldMs, PeerUpdateParallelism, MaxUnreliableQueuePerPeer,
+        // PeerUpdatePeersPerWorker and MaxSendSockets, so existing files get rewritten with them.
+        Assert.Equal(7, LNLTransportConfig.CurrentConfigVersion);
+        Assert.Equal(0, cfg.MaxSendSockets);   // 0 = auto: half the cores, 4 to 64
+        Assert.Equal(0, cfg.PeerUpdatePeersPerWorker);
+        Assert.Equal(256, cfg.MaxUnreliableQueuePerPeer);
         Assert.Equal(0, cfg.ConfigVersion);
+        Assert.Equal(3f, cfg.MergeHoldMs);
+        Assert.Equal(0, cfg.PeerUpdateParallelism);
         Assert.True(cfg.UseNativeSockets);
         Assert.True(cfg.NatPunchEnabled);
         Assert.Equal(32, cfg.NatPortPredictionRange);
@@ -882,8 +886,6 @@ public class ServerMessageRegistryBindingTableTests
         BasisNetworkCommons.ContentShareChannel,
         BasisNetworkCommons.DeltaAvatarChannel,
         BasisNetworkCommons.ServerBoundChannel,
-        BasisNetworkCommons.StoreDatabaseChannel,
-        BasisNetworkCommons.RequestStoreDatabaseChannel,
         BasisNetworkCommons.AdminChannel,
         BasisNetworkCommons.ServerStatisticsChannel,
         BasisNetworkCommons.CameraPIPStateChannel,

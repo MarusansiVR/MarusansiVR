@@ -776,9 +776,9 @@ public static class SettingsProviderIK
             }
 
             var elbowSwingToggle = PanelToggle.CreateNewEntry(dynamicsParent);
-            elbowSwingToggle.Descriptor.SetTitle("Elbow Swing Smoothing");
+            elbowSwingToggle.Descriptor.SetTitle(BasisLocalization.Get("settings.bodyTracking.elbowSwingSmoothing.title"));
             elbowSwingToggle.AssignBinding(BasisSettingsDefaults.FBIKElbowSwingEnabled);
-            elbowSwingToggle.Descriptor.SetTooltip("Rate-limits the elbow/knee swing and how fast a torso-collision push eases in. Off = the elbow swings freely (test for over-damping).");
+            elbowSwingToggle.Descriptor.SetTooltip(BasisLocalization.Get("settings.bodyTracking.elbowSwingSmoothing.title.tooltip"));
 
             var swingSmooth = PanelSlider.CreateAndBind(
                 dynamicsParent,
@@ -1544,6 +1544,7 @@ public static class SettingsProviderIK
         BasisSettingsDefaults.IKMode.ResetToDefault();
         BasisSettingsDefaults.EnableArmToHeightBlend.ResetToDefault();
         BasisSettingsDefaults.ArmToHeightBlend.ResetToDefault();
+        BasisSettingsDefaults.ContinuousBodyMeasurement.ResetToDefault();
         BasisSettingsDefaults.IKLockMode.ResetToDefault();
         BasisSettingsDefaults.CalibrationMirror.ResetToDefault();
         BasisSettingsDefaults.CustomScale.ResetToDefault();
@@ -1771,10 +1772,7 @@ public static class SettingsProviderIK
             PanelElementDescriptor.ElementStyles.Group,
             parent);
         boneSelectGroup.SetTitle(BasisLocalization.Get("settings.ik.title.perBoneSettings"));
-        boneSelectGroup.SetDescription(
-            "Pick a bone to inspect or tune. The toggles and sliders below apply only " +
-            "to the bone you select here — switch bones to see each one's settings."
-        );
+        boneSelectGroup.SetDescription(BasisLocalization.Get("settings.ik.title.perBoneSettings.description"));
 
         var boneNames = _bones.Select(b => b.Name).ToList();
         _boneDropdown = PanelDropdown.CreateNewEntry(boneSelectGroup.ContentParent);
@@ -1788,11 +1786,7 @@ public static class SettingsProviderIK
             PanelElementDescriptor.ElementStyles.Group,
             parent);
         _boneEuroEditorGroup.SetTitle(BasisLocalization.Get("settings.ik.title.calibrationSmoothing"));
-        _boneEuroEditorGroup.SetDescription(
-            "Controls for the selected bone. Use For Calibration decides whether trackers " +
-            "can be assigned to this role during full-body calibration; the smoothing and " +
-            "Euro filter toggles below shape how the bone reacts to incoming motion."
-        );
+        _boneEuroEditorGroup.SetDescription(BasisLocalization.Get("settings.ik.title.calibrationSmoothing.description"));
 
         _uiUseCalibration = PanelToggle.CreateNewEntry(_boneEuroEditorGroup.ContentParent);
         _uiUseCalibration.Descriptor.SetTitle(BasisLocalization.Get("settings.ik.title.useForCalibration"));
@@ -1895,22 +1889,7 @@ public static class SettingsProviderIK
     /// </summary>
     private static void RebuildLayoutChain(RectTransform from, PanelElementDescriptor tabDesc)
     {
-        RectTransform stop = tabDesc != null ? tabDesc.ContentParent : null;
-        RectTransform current = from;
-        while (current != null)
-        {
-            if (current.GetComponent<UnityEngine.UI.ILayoutController>() != null)
-            {
-                UnityEngine.UI.LayoutRebuilder.ForceRebuildLayoutImmediate(current);
-            }
-
-            if (current == stop)
-            {
-                return;
-            }
-
-            current = current.parent as RectTransform;
-        }
+        PanelElementDescriptor.RebuildLayoutChain(from, tabDesc != null ? tabDesc.ContentParent : null);
     }
 
     private static void AddSmoothingGroup(PanelElementDescriptor tabDesc, RectTransform parent, BasisSettingsDefaults.SmoothingGroupBindings group)

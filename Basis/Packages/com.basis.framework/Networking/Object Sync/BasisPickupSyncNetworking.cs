@@ -61,10 +61,17 @@ public class BasisPickupSyncNetworking : BasisSyncedTransform, IBasisStaticLocka
     private int _lastAppliedHandId;
     private Vector3 _attachWorldPos;
     private Quaternion _attachWorldRot = Quaternion.identity;
+    private Vector3 _attachOffsetPos;
+    private Quaternion _attachOffsetRot = Quaternion.identity;
     private bool _haveAttachPose;
+    private bool _reweldQueued;
     private Animator _cachedHandAnimator;
     private int _cachedHandId;
     private Transform _cachedHand;
+
+    // Owner-side: the hand id we last wrote into _attachId, so a transient failure to resolve our own
+    // hand bone (avatar swap mid-hold) freezes the in-hand stream instead of flipping to world encoding.
+    private byte _lastSentHandId;
 
     private bool _authoredKinematic;
     private bool _authoredKinematicLatched;
@@ -155,11 +162,21 @@ public class BasisPickupSyncNetworking : BasisSyncedTransform, IBasisStaticLocka
             Quaternion inv = Quaternion.Inverse(handRot);
             EncodePose(inv * (wp - handPos), inv * wr, Target.localScale);
             LocalSet(_attachId, handId);
+            _lastSentHandId = handId;
+            return;
+        }
+
+        if (_attachId.IsValid && _lastSentHandId != HandNone && IsHeldByOwner())
+        {
+            // Still held but our own hand bone can't be resolved right now (avatar swapping/loading).
+            // Freeze the in-hand stream rather than flipping to world encoding - remotes keep the prop
+            // glued to their copy of our hand, mirroring the receive-side hold for an unresolvable owner.
             return;
         }
 
         base.OnBeforeTransmit();
         if (_attachId.IsValid) LocalSet(_attachId, HandNone);
+        _lastSentHandId = HandNone;
 
         if (!_velX.IsValid || BasisPickupInteractable == null) return;
         Rigidbody rb = BasisPickupInteractable.RigidRef;
@@ -199,11 +216,18 @@ public class BasisPickupSyncNetworking : BasisSyncedTransform, IBasisStaticLocka
                 {
                     ComposeSyncedPose(out Vector3 offPos, out Quaternion offRot, out Vector3 s);
                     hand.GetPositionAndRotation(out Vector3 hp, out Quaternion hr);
+                    _attachOffsetPos = offPos;
+                    _attachOffsetRot = offRot;
                     _attachWorldPos = hp + hr * offPos;
                     _attachWorldRot = hr * offRot;
                     _haveAttachPose = true;
                     Target.SetPositionAndRotation(_attachWorldPos, _attachWorldRot);
                     if (HasSyncedScale) Target.localScale = s;
+                    if (!_reweldQueued)
+                    {
+                        _reweldQueued = true;
+                        BasisSyncDriver.QueuePickupReweld(this);
+                    }
                 }
                 // else: the owner's avatar/hand isn't resolvable (out of range, still loading) — leave the
                 // prop at its last pose rather than snapping it to the offset interpreted as a world pose.
@@ -271,7 +295,7 @@ public class BasisPickupSyncNetworking : BasisSyncedTransform, IBasisStaticLocka
         handId = HandNone;
         handPos = default;
         handRot = Quaternion.identity;
-        if (!AttachToHandOnGrab || !IsOwnedLocallyOnClient || BasisPickupInteractable == null) return false;
+        if (!AttachToHandOnGrab || !_attachId.IsValid || !IsOwnedLocallyOnClient || BasisPickupInteractable == null) return false;
 
         BasisInputSources inputs = BasisPickupInteractable.Inputs;
         BasisBoneTrackedRole role;
@@ -320,6 +344,18 @@ public class BasisPickupSyncNetworking : BasisSyncedTransform, IBasisStaticLocka
         _cachedHand = resolved;
         hand = resolved;
         return true;
+    }
+
+    /// <summary>Re-weld against the holder's freshly posed skeleton (see <see cref="BasisSyncDriver.ReweldAttachedPickups"/>).</summary>
+    internal void ReweldAfterRemoteBones()
+    {
+        _reweldQueued = false;
+        if (IsOwnedLocallyOnClient || Target == null) return;
+        if (!TryResolveOwnerHandTransform(_lastAppliedHandId, out Transform hand)) return;
+        hand.GetPositionAndRotation(out Vector3 hp, out Quaternion hr);
+        _attachWorldPos = hp + hr * _attachOffsetPos;
+        _attachWorldRot = hr * _attachOffsetRot;
+        Target.SetPositionAndRotation(_attachWorldPos, _attachWorldRot);
     }
 
     private bool CanHover(BasisInput input)
@@ -408,6 +444,18 @@ public class BasisPickupSyncNetworking : BasisSyncedTransform, IBasisStaticLocka
     public override void OnOwnershipTransfer(BasisNetworkPlayer newOwner)
     {
         base.OnOwnershipTransfer(newOwner);
+        if (IsOwnedLocallyOnClient)
+        {
+            // Our tenure invalidates the remote-side attach state. Without this, when ownership later
+            // returns to a remote holder, the first applied packet sees the stale held-edge and flashes
+            // the prop at the previous tenure's in-hand pose.
+            _lastAppliedHandId = HandNone;
+            _haveAttachPose = false;
+        }
+        else
+        {
+            _lastSentHandId = HandNone;
+        }
         ControlState();
     }
 

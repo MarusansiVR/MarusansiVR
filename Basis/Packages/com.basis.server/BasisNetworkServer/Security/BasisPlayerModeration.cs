@@ -219,6 +219,7 @@ namespace BasisNetworkServer.Security
             if (!NetworkServer.AuthIdentity.NetIDToUUID(peer, out string UUID))
             {
                 SendBackMessage(peer, "UUID not found");
+                reader.Recycle();
                 return;
             }
 
@@ -232,10 +233,12 @@ namespace BasisNetworkServer.Security
                 if (!PermissionIntegration.HasValidRequirement(peer, PermNodes.PermissionsView))
                 {
                     SendBackMessage(peer, "No permission: view");
+                    reader.Recycle();
                     return;
                 }
 
                 HandleGetPermissions(peer);
+                reader.Recycle();
                 return;
             }
 
@@ -405,6 +408,31 @@ namespace BasisNetworkServer.Security
                 case AdminRequestMode.GlobalToggleEndEffectorIK:
                     Require(peer, PermNodes.ModerationGlobalLock, () =>
                         HandleGlobalToggle(peer, "Remote end-effector IK", BasisGlobalLockManager.ToggleEndEffectorIK()));
+                    break;
+
+                case AdminRequestMode.GlobalToggleTextChat:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Text chat", BasisGlobalLockManager.ToggleTextChat()));
+                    break;
+
+                case AdminRequestMode.GlobalToggleVoiceChat:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Voice chat", BasisGlobalLockManager.ToggleVoiceChat()));
+                    break;
+
+                case AdminRequestMode.GlobalToggleMediaPlayer:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Media player", BasisGlobalLockManager.ToggleMediaPlayer()));
+                    break;
+
+                case AdminRequestMode.GlobalToggleCameraCapture:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Camera capture", BasisGlobalLockManager.ToggleCameraCapture()));
+                    break;
+
+                case AdminRequestMode.GlobalTogglePropGrabbing:
+                    Require(peer, PermNodes.ModerationGlobalLock, () =>
+                        HandleGlobalToggle(peer, "Prop grabbing", BasisGlobalLockManager.TogglePropGrabbing()));
                     break;
 
                 case AdminRequestMode.SetGlobalAvatarScaleLimits:
@@ -673,34 +701,78 @@ namespace BasisNetworkServer.Security
 
         private static void HandlePermissionEdit(AdminRequestMode mode, NetPeer peer, NetPacketReader reader)
         {
+            // SetUserGroup/SetUserNode/SetGroupNode/SetGroupParent all carry a trailing `add` bool.
+            // It used to be left unread, so every "remove" button on the client added instead.
+            string result;
             switch (mode)
             {
                 case AdminRequestMode.SetUserGroup:
-                    PermissionIntegration.Manager.AddUserToGroup(reader.GetString(), reader.GetString());
+                {
+                    string uuid = reader.GetString();
+                    string group = reader.GetString();
+                    bool add = reader.GetBool();
+                    if (add) PermissionIntegration.Manager.AddUserToGroup(uuid, group);
+                    else PermissionIntegration.Manager.RemoveUserFromGroup(uuid, group);
+                    result = $"{(add ? "Added" : "Removed")} {uuid} {(add ? "to" : "from")} group '{group}'.";
                     break;
+                }
 
                 case AdminRequestMode.SetUserNode:
-                    PermissionIntegration.Manager.AddUserNode(reader.GetString(), reader.GetString());
+                {
+                    string uuid = reader.GetString();
+                    string node = reader.GetString();
+                    bool add = reader.GetBool();
+                    if (add) PermissionIntegration.Manager.AddUserNode(uuid, node);
+                    else PermissionIntegration.Manager.RemoveUserNode(uuid, node);
+                    result = $"{(add ? "Added" : "Removed")} node '{node}' {(add ? "to" : "from")} user {uuid}.";
                     break;
+                }
 
                 case AdminRequestMode.SetGroupNode:
-                    PermissionIntegration.Manager.AddGroupNode(reader.GetString(), reader.GetString());
+                {
+                    string group = reader.GetString();
+                    string node = reader.GetString();
+                    bool add = reader.GetBool();
+                    if (add) PermissionIntegration.Manager.AddGroupNode(group, node);
+                    else PermissionIntegration.Manager.RemoveGroupNode(group, node);
+                    result = $"{(add ? "Added" : "Removed")} node '{node}' {(add ? "to" : "from")} group '{group}'.";
                     break;
+                }
 
                 case AdminRequestMode.CreateGroup:
-                    PermissionIntegration.Manager.GetOrCreateGroup(reader.GetString());
+                {
+                    string group = reader.GetString();
+                    PermissionIntegration.Manager.GetOrCreateGroup(group);
+                    result = $"Group '{group}' created.";
                     break;
+                }
 
                 case AdminRequestMode.DeleteGroup:
-                    PermissionIntegration.Manager.DeleteGroup(reader.GetString());
+                {
+                    string group = reader.GetString();
+                    result = PermissionIntegration.Manager.DeleteGroup(group)
+                        ? $"Group '{group}' deleted."
+                        : $"No group named '{group}'.";
                     break;
+                }
 
                 case AdminRequestMode.SetGroupParent:
-                    PermissionIntegration.Manager.AddGroupParent(reader.GetString(), reader.GetString());
+                {
+                    string group = reader.GetString();
+                    string parent = reader.GetString();
+                    bool add = reader.GetBool();
+                    if (add) PermissionIntegration.Manager.AddGroupParent(group, parent);
+                    else PermissionIntegration.Manager.RemoveGroupParent(group, parent);
+                    result = $"Group '{group}' {(add ? "now inherits" : "no longer inherits")} '{parent}'.";
+                    break;
+                }
+
+                default:
+                    result = "Permission updated";
                     break;
             }
 
-            SendBackMessage(peer, "Permission updated");
+            SendBackMessage(peer, result);
         }
 
         private static void HandleGetPermissions(NetPeer peer)
@@ -817,18 +889,12 @@ namespace BasisNetworkServer.Security
 
         private static void HandleResourceLimitsSet(NetPeer peer, NetPacketReader reader)
         {
-            int maxDatabaseEntries = reader.GetInt();
-            int maxDatabaseNameLength = reader.GetInt();
-            int maxDatabasePayloadEntries = reader.GetInt();
             int maxContentSpheresPerPlayer = reader.GetInt();
-            BasisResourceLimitManager.SetLimits(maxDatabaseEntries, maxDatabaseNameLength, maxDatabasePayloadEntries, maxContentSpheresPerPlayer);
-            NetworkServer.Configuration.MaxDatabaseEntries = BasisResourceLimitManager.MaxDatabaseEntries;
-            NetworkServer.Configuration.MaxDatabaseNameLength = BasisResourceLimitManager.MaxDatabaseNameLength;
-            NetworkServer.Configuration.MaxDatabasePayloadEntries = BasisResourceLimitManager.MaxDatabasePayloadEntries;
+            BasisResourceLimitManager.SetLimits(maxContentSpheresPerPlayer);
             NetworkServer.Configuration.MaxContentSpheresPerPlayer = BasisResourceLimitManager.MaxContentSpheresPerPlayer;
             SaveConfig();
             BasisResourceLimitManager.BroadcastState();
-            SendBackMessage(peer, $"Resource limits set: db entries {BasisResourceLimitManager.MaxDatabaseEntries}, name length {BasisResourceLimitManager.MaxDatabaseNameLength}, payload entries {BasisResourceLimitManager.MaxDatabasePayloadEntries}, spheres/player {BasisResourceLimitManager.MaxContentSpheresPerPlayer}.");
+            SendBackMessage(peer, $"Resource limits set: spheres/player {BasisResourceLimitManager.MaxContentSpheresPerPlayer}.");
         }
 
         private static void HandleReductionSettingsSet(NetPeer peer, NetPacketReader reader)

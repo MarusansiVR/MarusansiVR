@@ -15,6 +15,7 @@ namespace Basis.EventDriver
         public static readonly ProfilerMarker FixedUpdate = new ProfilerMarker("BasisDriver.FixedUpdate");
         public static readonly ProfilerMarker LateUpdate = new ProfilerMarker("BasisDriver.LateUpdate");
         public static readonly ProfilerMarker BeforeRender = new ProfilerMarker("BasisDriver.OnBeforeRender");
+        public static readonly ProfilerMarker BeforeRenderCallbacks = new ProfilerMarker("BasisDriver.OnBeforeRender.Callbacks");
 
         public static readonly ProfilerMarker NetworkCompleteCompute = new ProfilerMarker("BasisDriver.Network.CompleteCompute");
         public static readonly ProfilerMarker FrameClockTick = new ProfilerMarker("BasisDriver.FrameClock.Tick");
@@ -27,7 +28,9 @@ namespace Basis.EventDriver
         public static readonly ProfilerMarker PerformanceLimits = new ProfilerMarker("BasisDriver.PerfLimits.AvatarLimits");
         public static readonly ProfilerMarker DebugOptions = new ProfilerMarker("BasisDriver.DebugOptions");
         public static readonly ProfilerMarker GazeFoveationAuto = new ProfilerMarker("BasisDriver.Eye.GazeFoveationAuto");
+        public static readonly ProfilerMarker BodyEvidenceSample = new ProfilerMarker("BasisDriver.Calibration.BodyEvidenceSample");
         public static readonly ProfilerMarker HighPlayerCap = new ProfilerMarker("BasisDriver.PerfLimits.HighPlayerCap");
+        public static readonly ProfilerMarker DesktopFileDrop = new ProfilerMarker("BasisDriver.Platform.DesktopFileDrop");
         public static readonly ProfilerMarker OnUpdateCallbacks = new ProfilerMarker("BasisDriver.OnUpdateCallbacks");
 
         public static readonly ProfilerMarker SceneFactorySimulate = new ProfilerMarker("BasisDriver.SceneFactory.Simulate");
@@ -49,11 +52,13 @@ namespace Basis.EventDriver
         public static readonly ProfilerMarker FacialBlink = new ProfilerMarker("BasisDriver.LocalPlayer.FacialBlink");
         public static readonly ProfilerMarker VisemeApply = new ProfilerMarker("BasisDriver.LocalPlayer.VisemeApply");
         public static readonly ProfilerMarker LocalPlayerSimulate = new ProfilerMarker("BasisDriver.LocalPlayer.Simulate");
+        public static readonly ProfilerMarker LocalPlayerFinish = new ProfilerMarker("BasisDriver.LocalPlayer.FinishSimulate");
         public static readonly ProfilerMarker LocalHandApply = new ProfilerMarker("BasisDriver.LocalPlayer.HandApply");
         public static readonly ProfilerMarker LocalCameraSimulate = new ProfilerMarker("BasisDriver.LocalPlayer.CameraSimulate");
         public static readonly ProfilerMarker LocalEyeSimulate = new ProfilerMarker("BasisDriver.LocalPlayer.EyeSimulate");
         public static readonly ProfilerMarker LocalEyeApply = new ProfilerMarker("BasisDriver.LocalPlayer.EyeApply");
         public static readonly ProfilerMarker RemoteBoneComplete = new ProfilerMarker("BasisDriver.RemoteBone.CompleteJobs");
+        public static readonly ProfilerMarker PickupReweld = new ProfilerMarker("BasisDriver.Sync.PickupReweld");
         public static readonly ProfilerMarker RemoteAudioSimulate = new ProfilerMarker("BasisDriver.RemoteAudio.Simulate");
         public static readonly ProfilerMarker RemoteAudioApply = new ProfilerMarker("BasisDriver.RemoteAudio.Apply");
         public static readonly ProfilerMarker NamePlateSchedule = new ProfilerMarker("BasisDriver.NamePlate.Schedule");
@@ -82,6 +87,8 @@ namespace Basis.EventDriver
         public static readonly ProfilerMarker JiggleCompletePoseDeferred = new ProfilerMarker("BasisDriver.Jiggle.CompletePose(Deferred)");
         public static readonly ProfilerMarker JiggleRender = new ProfilerMarker("BasisDriver.Jiggle.Render");
         public static readonly ProfilerMarker AfterAvatarChanges = new ProfilerMarker("BasisDriver.Network.AfterAvatarChanges");
+        /// <summary>Post-load avatar installs released into the frame's install-safe window.</summary>
+        public static readonly ProfilerMarker AvatarInstallPump = new ProfilerMarker("BasisDriver.Avatar.InstallPump");
         public static readonly ProfilerMarker FrameSync = new ProfilerMarker("BasisDriver.FrameSync");
         public static readonly ProfilerMarker JoinLeaveNotification = new ProfilerMarker("BasisDriver.UI.JoinLeaveNotification");
         public static readonly ProfilerMarker SimulateBeacon = new ProfilerMarker("BasisDriver.Player.SimulateBeacon");

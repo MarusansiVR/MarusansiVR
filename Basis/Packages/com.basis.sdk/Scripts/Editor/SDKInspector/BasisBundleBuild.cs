@@ -32,6 +32,23 @@ public static class BasisBundleBuild
         Bounds unitybounds = CalculateLocalRenderBounds(BasisContentBase.gameObject);
         BasisBounds BasisBounds = new BasisBounds(unitybounds.center, unitybounds.size);
 
+        // Far avatar generation runs once here (before the per-platform loop) on the live build
+        // clone, while its real materials are still intact. Failure is never fatal to the build.
+        string farLodBase64 = null;
+        if (BasisContentBase is BasisAvatar farLodSourceAvatar)
+        {
+            try
+            {
+                farLodBase64 = BasisFarLodGenerator.GenerateBase64(farLodSourceAvatar);
+            }
+            catch (Exception ex)
+            {
+                BasisFarLodGenerator.LastFailureReason = $"generation threw {ex.GetType().Name}: {ex.Message}";
+                Debug.LogException(ex);
+                Debug.LogWarning("Far avatar generation failed — building the bundle without a far avatar.");
+            }
+        }
+
         var meta = GenerateMetaData(BasisContentBase.gameObject);
         string FolderPath = MakeSafeFolderName(BasisContentBase.BasisBundleDescription.AssetBundleName);
         return await BuildBundle(FolderPath,
@@ -43,7 +60,8 @@ public static class BasisBundleBuild
             useProvidedPassword: useProvidedPassword,
             OverriddenPassword: OverriddenPassword,
             buildFunction: (content, obj, hex, target, buildId) =>
-                BasisAssetBundlePipeline.BuildAssetBundle(content.gameObject, obj, hex, target, FolderPath));
+                BasisAssetBundlePipeline.BuildAssetBundle(content.gameObject, obj, hex, target, FolderPath),
+            FarLodBase64: farLodBase64);
     }
     /// <summary>
     /// Calculates bounds of all child renderers in PARENT LOCAL SPACE (pivot-relative).
@@ -352,6 +370,10 @@ public static class BasisBundleBuild
         meta.BonesCount = bonesCount;
         meta.TextureMemoryBytes = textureMemoryBytes;
         meta.GraphicsPipeline = DetectGraphicsPipeline();
+        if (root.TryGetComponent(out BasisProp prop))
+        {
+            meta.PropSpawn = prop.SpawnMetaData;
+        }
         meta.ComponentNames = componentCounts
             .Select(kvp => new BasisBundleConnector.BasisComponentName
             {
@@ -449,7 +471,8 @@ public static class BasisBundleBuild
       bool useProvidedPassword,
       string OverriddenPassword,
       Func<BasisContentBase, BasisAssetBundleObject, string, BuildTarget, string,
-           Task<(bool, (BasisBundleGenerated, AssetBundleBuilder.InformationHash))>> buildFunction)
+           Task<(bool, (BasisBundleGenerated, AssetBundleBuilder.InformationHash))>> buildFunction,
+      string FarLodBase64 = null)
     {
         string generatedID = null;
         string stagingRoot = null;
@@ -501,7 +524,7 @@ public static class BasisBundleBuild
             string Password = useProvidedPassword ? OverriddenPassword : GenerateHexString(32);
 
             int targetsLength = targets.Count;
-            BasisBundleGenerated[] bundles = new BasisBundleGenerated[targetsLength];
+            List<BasisBundleGenerated> bundles = new List<BasisBundleGenerated>(targetsLength + 1);
             List<string> paths = new List<string>();
 
             for (int Index = 0; Index < targetsLength; Index++)
@@ -515,7 +538,7 @@ public static class BasisBundleBuild
                     return (false, $"Failure While Building for {target}");
                 }
 
-                bundles[Index] = result.Item1;
+                bundles.Add(result.Item1);
 
                 string hashPath = PathConversion(result.Item2.EncyptedPath);
                 paths.Add(hashPath);
@@ -523,15 +546,39 @@ public static class BasisBundleBuild
                 BasisDebug.Log("Adding " + result.Item2.EncyptedPath);
             }
 
+            // Avatars additionally get a platform-agnostic Generic (glTF) section, appended
+            // after the platform sections so platforms without a purpose-built AssetBundle can
+            // still load the avatar. Appending last keeps every platform section's byte range
+            // where old clients expect it, and failure is never fatal to the build.
+            if (basisContentBase is BasisAvatar genericSourceAvatar && assetBundleObject.GenerateGenericGLTF)
+            {
+                try
+                {
+                    var (genericGenerated, genericEncryptedPath) = await BasisGenericAvatarExporter.ExportEncryptedGlb(genericSourceAvatar, assetBundleObject, Password, stagingRoot);
+                    if (genericGenerated != null && !string.IsNullOrEmpty(genericEncryptedPath))
+                    {
+                        bundles.Add(genericGenerated);
+                        paths.Add(genericEncryptedPath);
+                        BasisDebug.Log("Adding generic (glTF) section " + genericEncryptedPath);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Debug.LogException(ex);
+                    Debug.LogWarning("Generic (glTF) section generation failed — building the bundle without it.");
+                }
+            }
+
             EditorUtility.DisplayProgressBar(BasisEditorLocalization.Get("sdk.bundleBuild.progress.start"), BasisEditorLocalization.Get("sdk.bundleBuild.progress.start"), 10);
 
             BasisBundleConnector basisBundleConnector = new BasisBundleConnector(
                 generatedID,
                 basisContentBase.BasisBundleDescription,
-                bundles,
+                bundles.ToArray(),
                 Images,
                 BasisBounds,
-                MetaData
+                MetaData,
+                FarLodBase64
             );
 
             byte[] BasisbundleconnectorUnEncrypted =
@@ -552,6 +599,14 @@ public static class BasisBundleBuild
             EditorUtility.DisplayProgressBar(BasisEditorLocalization.Get("sdk.bundleBuild.progress.saveBee"), BasisEditorLocalization.Get("sdk.bundleBuild.progress.saveBee"), 100);
 
             await AssetBundleBuilder.SaveFileAsync(buildOutDir, assetBundleObject.ProtectedPasswordFileName, "txt", Password);
+
+            // A missing far avatar is diagnosable from the build output alone: the reason lands
+            // next to the bee instead of only in a console that scrolls away.
+            if (basisContentBase is BasisAvatar && string.IsNullOrEmpty(FarLodBase64))
+            {
+                string skipReason = string.IsNullOrEmpty(BasisFarLodGenerator.LastFailureReason) ? "unknown (no reason recorded)" : BasisFarLodGenerator.LastFailureReason;
+                await AssetBundleBuilder.SaveFileAsync(buildOutDir, "faravatar_skip", "txt", $"{DateTime.UtcNow:o}\nFar avatar was not included in this bundle.\nReason: {skipReason}\n");
+            }
 
             EditorUtility.DisplayProgressBar(BasisEditorLocalization.Get("sdk.bundleBuild.progress.combineDone"), BasisEditorLocalization.Get("sdk.bundleBuild.progress.combineDone"), 100);
 

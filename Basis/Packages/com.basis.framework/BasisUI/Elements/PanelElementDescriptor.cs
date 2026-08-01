@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using TMPro;
 #if UNITY_EDITOR
@@ -127,6 +128,9 @@ namespace Basis.BasisUI
         private bool _descriptionSet;
         private bool _iconSet;
 
+        private Coroutine _titleFlash;
+        private string _titleBeforeFlash;
+
         protected bool _iconIsAddressable;
 
 
@@ -172,7 +176,53 @@ namespace Basis.BasisUI
 
         public override void OnReleaseEvent()
         {
+            CancelTitleFlash();
             base.OnReleaseEvent();
+        }
+
+        protected override void OnDisable()
+        {
+            CancelTitleFlash();
+            base.OnDisable();
+        }
+
+        /// <summary>
+        /// Briefly replaces the title with a transient message — a confirmation the
+        /// user reads on the control they just used — then restores the real title.
+        /// Repeat calls restart the timer rather than capturing the message as the
+        /// title to restore.
+        /// </summary>
+        public void FlashTitle(string message, float seconds = 1.5f)
+        {
+            if (!HasTitle || string.IsNullOrEmpty(message) || !isActiveAndEnabled) return;
+
+            if (_titleFlash != null)
+            {
+                StopCoroutine(_titleFlash);
+                _titleFlash = null;
+            }
+            else
+            {
+                _titleBeforeFlash = _title ?? string.Empty;
+            }
+
+            SetTitle(message);
+            _titleFlash = StartCoroutine(RestoreTitleAfter(seconds));
+        }
+
+        public void CancelTitleFlash()
+        {
+            if (_titleFlash == null) return;
+            StopCoroutine(_titleFlash);
+            _titleFlash = null;
+            SetTitle(_titleBeforeFlash);
+        }
+
+        private IEnumerator RestoreTitleAfter(float seconds)
+        {
+            yield return new WaitForSecondsRealtime(seconds);
+            _titleFlash = null;
+            SetTitle(_titleBeforeFlash);
         }
 
         public void SetIcon(Sprite value)
@@ -392,6 +442,37 @@ namespace Basis.BasisUI
         public void ForceRebuild()
         {
             LayoutRebuilder.ForceRebuildLayoutImmediate(rectTransform);
+        }
+
+        /// <summary>
+        /// Rebuilds outward from a container whose contents just changed height, hitting every ancestor
+        /// that actually carries a layout controller, innermost first, so each outer pass sees the
+        /// corrected inner height. Rows revealed or hidden inside a nested group otherwise leave every
+        /// group above them at its stale height — the group keeps the size it had, so the rows below it
+        /// never move and the page looks like it ignored the toggle. Rebuilding the page root instead
+        /// does not fix it: that pass measures the inner group before the group has resized itself.
+        /// <para>
+        /// Stops at <paramref name="stopAt"/> — pass the tab page's content so one reveal does not
+        /// rebuild the whole menu.
+        /// </para>
+        /// </summary>
+        public static void RebuildLayoutChain(RectTransform from, RectTransform stopAt)
+        {
+            RectTransform current = from;
+            while (current != null)
+            {
+                if (current.GetComponent<ILayoutController>() != null)
+                {
+                    LayoutRebuilder.ForceRebuildLayoutImmediate(current);
+                }
+
+                if (current == stopAt)
+                {
+                    return;
+                }
+
+                current = current.parent as RectTransform;
+            }
         }
 
         /// <summary>

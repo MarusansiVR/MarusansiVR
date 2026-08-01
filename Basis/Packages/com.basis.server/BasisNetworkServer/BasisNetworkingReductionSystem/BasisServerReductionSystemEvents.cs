@@ -160,6 +160,10 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
         // Only this player's own receive thread (one Parallel.For body) writes here,
         // so no synchronization is needed.
         public PendingAvatarSend[] PendingSends;
+        /// <summary>Largest PendingCount seen in the current shrink window. See PendingShrinkWindowTicks.</summary>
+        public int PendingPeak;
+        /// <summary>Flushes elapsed in the current shrink window.</summary>
+        public int PendingPeakTicks;
         public int PendingCount;
 
         // Scratch buffers reused tick-to-tick when emitting compressed bundles to this receiver.
@@ -182,25 +186,124 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
     {
         private static readonly CancellationTokenSource cts = new();
         // Initial capacity for PeerTracking array on PlayerState.
-        // Grows if a player ID exceeds this.
-        private const int InitialPlayerArrayCapacity = 2048;
+        // Grows if a player ID exceeds this (doubling, lock-guarded, in the distance and send
+        // loops). Peer ids are recycled so the high-water id tracks peak concurrent players: a
+        // flat 2048 charged every player 64 KB of tracking up front regardless of population —
+        // ~6 MB of dead weight at 100 players. 256 (8 KB) covers a small instance outright and a
+        // growing one doubles a handful of times on its way up, which is a one-time copy of a
+        // few-KB array per step.
+        private const int InitialPlayerArrayCapacity = 256;
+
+        /// <summary>
+        /// Default worker cap for the tick's parallel phases.
+        ///
+        /// This used to be <see cref="Environment.ProcessorCount"/>, which measured badly: the tick
+        /// runs ~275x/s, so each phase pays dispatch and wake cost per worker per tick, and each
+        /// extra thread adds GC poll-point traffic. Measured at 500 players on a 32-thread box,
+        /// same offered load throughout: 32 workers = 11.0 cores, 16 = 8.6, 8 = 6.6, 4 = 6.4 —
+        /// two thirds of the CPU at 32 workers was spent getting threads to the work rather than
+        /// doing it, and throughput was equal or better at the low end.
+        ///
+        /// Scales with the population — one worker per <see cref="PlayersPerWorker"/> players — but
+        /// capped hard at <see cref="MaxAutoWorkers"/>, which matters more than the scaling does.
+        ///
+        /// This phase is throughput-bound, not latency-bound: it is already rate-limited by the
+        /// tick budget via slicing, so extra workers do not let it deliver sooner, they just cost
+        /// more to schedule. The transport's per-peer pass is the opposite — it sets reliable
+        /// latency and genuinely needs workers as the population grows. Scaling both by the same
+        /// rule let the two pools oversubscribe the box, and measured worse on every axis:
+        /// at 4000 players, both scaled = 23.6 cores / 634 MB/s / 153 ms peak pass, this phase
+        /// pinned to 8 = 18.0 cores / 644 MB/s / 108 ms. At 2000, 11.0 cores against 7.8.
+        ///
+        /// So: let the latency-bound pool grow, keep this one small.
+        /// </summary>
+        private const int PlayersPerWorker = 128;
+
+        /// <summary>
+        /// Ceiling for the auto-sized worker count, from the machine-wide split in
+        /// <see cref="BasisCpuBudget"/>. This pool and the transport's per-peer pool overlap, so
+        /// the shares are decided in one place rather than each sizing itself against the whole box.
+        /// </summary>
+        private static int MaxAutoWorkers => BasisCpuBudget.ReductionSendCap;
+
+        private static int _configuredDegree;
+
+        private static int DegreeFor(int playerCount)
+        {
+            int cores = Environment.ProcessorCount;
+            if (_configuredDegree > 0)
+            {
+                return Math.Max(1, Math.Min(_configuredDegree, cores));
+            }
+
+            int ceiling = Math.Min(MaxAutoWorkers, cores);
+            if (ceiling < 1)
+            {
+                ceiling = 1;
+            }
+
+            int floor = Math.Min(BasisCpuBudget.MinWorkersPerPool, ceiling);
+            if (floor < 1)
+            {
+                floor = 1;
+            }
+
+            return Math.Clamp(playerCount / PlayersPerWorker, floor, ceiling);
+        }
 
         private static readonly ParallelOptions parallelOptions = new()
         {
-            // Use every core. The reserved core dated from when the tick thread itself was the
-            // bottleneck; measurement says it is not — the send loop already achieves near-perfect
-            // parallelism during its phase, and the idle capacity is in the phases around it.
-            MaxDegreeOfParallelism = Environment.ProcessorCount
+            MaxDegreeOfParallelism = 4
         };
+
+        /// <summary>
+        /// Retunes the worker cap for the current population. Called once per tick from the send
+        /// phase; assigning only on change keeps it free when the count is stable.
+        /// </summary>
+        private static void TuneParallelism(int playerCount)
+        {
+            int desired = DegreeFor(playerCount);
+            if (parallelOptions.MaxDegreeOfParallelism != desired)
+            {
+                parallelOptions.MaxDegreeOfParallelism = desired;
+            }
+        }
+
+        // A dedicated worker pool was tried here in place of Parallel.For and did not pay for
+        // itself: with the worker cap above already removing the oversubscription, what remained
+        // of Parallel's overhead was smaller than the cost of waking a fixed set of threads on
+        // every tick. Capping the degree is the win; replacing the scheduler is not.
+
+        /// <summary>
+        /// Applies the configured worker cap. Values &lt;= 0 select the measured default above;
+        /// anything higher than the core count is clamped, since oversubscribing only adds
+        /// context switches.
+        /// </summary>
+        public static void SetMaxDegreeOfParallelism(int configured)
+        {
+            _configuredDegree = configured;
+            if (configured > 0)
+            {
+                int resolved = Math.Min(configured, Environment.ProcessorCount);
+                parallelOptions.MaxDegreeOfParallelism = resolved;
+                BNL.Log($"[BSR] Parallel worker cap pinned to {resolved} (of {Environment.ProcessorCount} cores).");
+            }
+            else
+            {
+                BNL.Log($"[CPU] {BasisCpuBudget.Describe()}");
+                BNL.Log($"[BSR] Send workers scale with population: 1 per {PlayersPerWorker} players, {BasisCpuBudget.MinWorkersPerPool} to {MaxAutoWorkers}.");
+            }
+        }
 
         public static ShardedConcurrentDictionary<PlayerState> playerStates = new();
 
         // Admin-flagged full-quality broadcast ids. Authoritative across PlayerState recreation;
         // mirrored onto PlayerState.BypassReduction for the hot send loop. Cleared on disconnect.
         private static readonly ConcurrentDictionary<int, bool> _bypassReductionIds = new();
-        // Double-buffered message dictionaries: swap and clear instead of allocating per tick.
-        private static ShardedConcurrentDictionary<QueuedMessage> currentMessages = new();
-        private static ShardedConcurrentDictionary<QueuedMessage> _backMessages = new();
+        // Inbound avatar frames, keyed by sender so only the newest per peer survives to the tick.
+        // Drained (not cleared) each tick — see ShardedConcurrentDictionary.DrainInto for why the
+        // double-buffer this replaced was more expensive than the traffic it carried.
+        private static readonly ShardedConcurrentDictionary<QueuedMessage> currentMessages = new();
 
         public static float BSRBaseMultiplier = 1.0f;
         public static float BSRSIncreaseRate = 0.01f;
@@ -213,6 +316,24 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
         public static bool EnableAvatarBundleCompression = true;
         public static int AvatarBundleMinMessages = 2;
         public static int AvatarBundleMinBytes = 128;
+
+        /// <summary>
+        /// Largest bundle scratch buffer a receiver keeps between ticks. Below this the buffer is
+        /// retained (renting one per receiver per tick contends ArrayPool.Shared badly at scale);
+        /// above it the buffer goes back to the pool so an outlier tick cannot pin an
+        /// LOH-sized array per player. Steady state is a few KB.
+        /// </summary>
+        private const int RetainedScratchBytes = 16 * 1024;
+
+        /// <summary>
+        /// Flushes between reconsiderations of a receiver's PendingSends capacity. Long enough that
+        /// a receiver with bursty traffic keeps its buffer across the quiet stretches between
+        /// bursts, short enough that a population drop is reclaimed in seconds.
+        /// </summary>
+        private const int PendingShrinkWindowTicks = 256;
+
+        /// <summary>Floor for PendingSends so a quiet receiver still avoids immediate regrowth.</summary>
+        private const int PendingMinCapacity = 64;
 
         // Avatar delta compression (written from NetworkServer.InitializePulseSettings).
         // When on, each sender emits a full keyframe every AvatarDeltaKeyframeIntervalMs and, in
@@ -326,11 +447,32 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
         /// </summary>
         public static long intervalMs = 10;
 
-        // 4 ms (250 Hz) floor: no pair is ever scheduled faster than 20 Hz, so going below this only
-        // adds barriers. 20 ms (50 Hz) ceiling: still comfortably under the 50 ms shortest interval,
-        // so even fully backed off the tick never becomes the thing limiting delivery rate.
+        // 4 ms (250 Hz) absolute floor: no pair is ever scheduled faster than 20 Hz, so going below
+        // this only adds barriers. 20 ms (50 Hz) ceiling: still comfortably under the 50 ms shortest
+        // interval, so even fully backed off the tick never becomes the thing limiting delivery.
         public const long MinTickIntervalMs = 4;
         public const long MaxTickIntervalMs = 20;
+
+        /// <summary>
+        /// How many ticks the loop wants inside the shortest send interval, and so how far it is
+        /// allowed to speed up when there is spare budget.
+        ///
+        /// The period only has to be fine enough to hit a pair's deadline without much jitter;
+        /// beyond that, extra ticks find nothing due and pay fork/join on several Parallel loops for
+        /// it. The old flat 4 ms floor meant a nearly idle server ran the whole tick machinery ~300
+        /// times a second — measured at 500 players, scheduling was 59% of all server CPU, a flat
+        /// ~1.1 cores that did not shrink with the population. Four ticks per interval bounds the
+        /// added latency to a quarter of the shortest interval while running a third of the ticks.
+        /// </summary>
+        private const int TicksPerSendInterval = 4;
+
+        /// <summary>
+        /// Fastest period worth running for the current configuration. Derived from the shortest
+        /// send interval rather than fixed, so lowering BSRSMillisecondDefaultInterval still buys a
+        /// finer tick and raising it stops paying for one.
+        /// </summary>
+        private static long AdaptiveMinIntervalMs =>
+            Math.Max(MinTickIntervalMs, BSRSMillisecondDefaultInterval / TicksPerSendInterval);
         // Fallback wake while the server is empty; _tickWake.Set() does the real wake.
         private const int IdleWaitMs = 250;
         // Load-adaptive inter-tick wait: if the tick left more than this much of its budget
@@ -344,6 +486,269 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
         // Adaptive: increases when ticks take too long, decreases when under budget.
         private static int _sliceCount = 1;
         private static int _sliceIndex = 0;
+
+        /// <summary>
+        /// Rotating offset for the order senders are visited in. Advanced once per tick so that
+        /// being early in the order — and so surviving a queue trim — is shared out rather than
+        /// being a permanent property of a player's position in the roster.
+        /// </summary>
+        private static int _senderRotation;
+
+        /// <summary>Smoothed duty cycle of the tick: work time over the period it targets.</summary>
+        private static double _tickDutyEma;
+
+        /// <summary>Sender/receiver pairs the last send pass covered. Paired with its duration.</summary>
+        private static long _lastSendPairs;
+
+        private static long _lastRebalanceTick;
+        private static long _lastPeersUpdatedTotal;
+        private static long _lastPeerBusyMicros;
+
+        /// <summary>
+        /// Feeds each pool's load back to the core allocator and re-divides the machine.
+        ///
+        /// Load alone was measured to be a misleading signal — see BasisCpuBudget.ReportPressure
+        /// for the run where steering on it widened the send pool from 8 workers to 13 for no extra
+        /// throughput. What makes it safe to act on is that it is no longer acting alone: every
+        /// lease declares the ceiling past which cores stop helping it, and load only moves a pool
+        /// inside its own bounds. Cores a pinned-but-capped pool cannot use go to one that can.
+        /// </summary>
+        private static void RebalanceCpuBudget(long nowTick)
+        {
+            if (nowTick - _lastRebalanceTick < RebalanceIntervalTicks) return;
+            _lastRebalanceTick = nowTick;
+
+            double peerPressure = 0;
+            LiteNetLib.NetManager lnl = (NetworkServer.Server as LNLNetManager)?.manager;
+            if (lnl != null)
+            {
+                peerPressure = lnl.PeerUpdatePressure;
+
+                // Differentiate the transport's totals here rather than having it call into the
+                // allocator — LiteNetLib is vendored and does not reference Basis.Network.Core, so
+                // the counters cross the boundary as plain numbers.
+                long peers = lnl.PeersUpdatedTotal;
+                long busy = lnl.PeerUpdateBusyMicros;
+                if (_lastPeersUpdatedTotal > 0 || _lastPeerBusyMicros > 0)
+                {
+                    BasisCpuBudget.PeerUpdateLease.AddWork(
+                        peers - _lastPeersUpdatedTotal,
+                        (busy - _lastPeerBusyMicros) / 1000.0);
+                }
+                _lastPeersUpdatedTotal = peers;
+                _lastPeerBusyMicros = busy;
+            }
+
+            BasisCpuBudget.ReportPressure(_tickDutyEma, peerPressure);
+            BasisCpuBudget.Rebalance();
+
+            // Tell the transport how full the machine is, so its pool can tell being short of
+            // workers apart from being short of cores.
+            double util = BasisCpuBudget.SampleUtilization();
+            if (lnl != null)
+            {
+                lnl.MachineUtilization = util;
+
+                // Push the current grant, not just the one from construction. Without this the
+                // transport keeps whatever share it was handed at startup and none of the
+                // rebalancing above reaches it — the allocator would be moving a number nobody
+                // reads. The transport still sizes itself inside this cap by population and by its
+                // own probe; the cap is the ceiling that makes the two pools compose.
+                lnl.PeerUpdateWorkerCap = BasisCpuBudget.PeerUpdateCap;
+                // Send capacity is set by socket count, not core count — tell the budget how many
+                // actually bound so the send pool is sized for the paths that exist.
+                BasisCpuBudget.SetSendSocketCount(lnl.BoundSendSocketCount);
+                MaybeGrowSendSockets(lnl, nowTick, util);
+            }
+
+            // Say which pool is hot, periodically. The split is tuned from measurements taken on
+            // one machine; on hardware with a different core count or per-core speed this line is
+            // what tells an operator whether the shipped default is wrong for them, and which of
+            // BSRMaxDegreeOfParallelism / PeerUpdateParallelism to reach for.
+            if (WriteLoadLog && nowTick - _lastPoolLoadLogTick >= PoolLoadLogIntervalTicks)
+            {
+                _lastPoolLoadLogTick = nowTick;
+                int peerWorkers = lnl?.PeerUpdateWorkers ?? 0;
+                // Workers actually running, not just what each pool is allowed — the gap between
+                // those two is what hid a server using a quarter of a large host.
+                BNL.Log(
+                    $"[CPU] send {parallelOptions.MaxDegreeOfParallelism}/{BasisCpuBudget.ReductionSendCap} workers, " +
+                    $"peer-update {peerWorkers}/{BasisCpuBudget.PeerUpdateCap} workers " +
+                    $"(pass {lnl?.PeerUpdatePassMs ?? 0:F1} ms, target {LiteNetLib.NetManager.PeerPassTargetMs:F0} ms), machine {BasisCpuBudget.Utilization * 100:F0}% of {BasisCpuBudget.TotalCores} cores.");
+            }
+        }
+
+        private static readonly long RebalanceIntervalTicks =
+            (long)(BasisCpuBudget.RebalanceIntervalMs * MsToTick);
+
+        /// <summary>Ceiling on runtime-added send sockets, from config. 0 disables growth.</summary>
+        public static int MaxSendSockets = 8;
+
+        private static long _lastSocketGrowTick;
+        private static int _sendPressureStreak;
+
+        // Sustained pressure before another socket is added, in rebalance steps (~100ms each), and
+        // the settle period after adding one.
+        private const int SendPressureStreakToGrow = 20;   // ~2s of continuous pressure
+        private const int SocketGrowSettleMs = 5000;
+
+        /// <summary>
+        /// How long to watch the drop rate after adding a socket before deciding whether it helped.
+        ///
+        /// The drop monitor samples every 10s, so anything shorter than this is reading one or two
+        /// samples of a counter that moves in steps.
+        /// </summary>
+        private const int SocketProbeWindowMs = 30000;
+
+        /// <summary>Fraction the drop rate has to fall by for a probe to count as a success.</summary>
+        private const double SocketProbeMustImproveBy = 0.20;
+
+        private static long _lastDropTotal = -1;
+        private static double _dropRateEma;
+        private static double _dropRateAtGrow;
+        private static long _probeDeadlineTick;
+        private static bool _probePending;
+
+        /// <summary>
+        /// Set when a probe showed that adding a socket did not reduce drops, meaning whatever is
+        /// losing packets is not something more receive threads can fix — an undersized
+        /// net.core.rmem_max, or a link that is simply full. Growth stops rather than spending
+        /// threads against a wall.
+        /// </summary>
+        private static bool _socketGrowthHelpless;
+        private static double _dropRateAtGiveUp;
+
+        /// <summary>Tracks drops per second so a probe can ask whether the last socket helped.</summary>
+        private static void SampleDropRate()
+        {
+            long total = BasisNetworkUdpDropMonitor.TotalReceiveBufferDrops;
+            if (_lastDropTotal < 0) { _lastDropTotal = total; return; }
+
+            double perSecond = (total - _lastDropTotal) * (1000.0 / BasisCpuBudget.RebalanceIntervalMs);
+            _lastDropTotal = total;
+
+            // Slow, because the source counter advances in 10s steps: a per-sample rate is mostly
+            // zeros with an occasional spike, and the question being asked is about the trend.
+            const double Alpha = 0.0033;   // ~30s time constant at a 100ms cadence
+            _dropRateEma += (perSecond - _dropRateEma) * Alpha;
+        }
+
+        /// <summary>
+        /// Adds a send socket when the send path — not the machine — is what is limiting us.
+        ///
+        /// The send loop is the one pool that gets *worse* with more threads: measured at 1000
+        /// players, 8 to 16 to 32 workers took the update phase from 6.1 to 12.9 to 15.4 ms per
+        /// tick while throughput fell from 497 to 393 MB/s, because they all queue on one socket.
+        /// So when it is the bottleneck the answer is another socket, not another core — and since
+        /// the send worker ceiling is derived from the bound socket count, one call widens both.
+        ///
+        /// "Send path is the bottleneck" is read as: the pool is pinned at its ceiling, the tick is
+        /// missing its budget, and the machine still has cores free. That last clause is what keeps
+        /// this from firing on a host that is simply out of CPU, where another receive thread would
+        /// make things worse. Pressure has to persist for a couple of seconds, because adding a
+        /// socket reshuffles the kernel's flow hash and is not worth doing for a spike.
+        /// </summary>
+        private static void MaybeGrowSendSockets(LiteNetLib.NetManager lnl, long nowTick, double utilization)
+        {
+            SampleDropRate();
+
+            if (MaxSendSockets <= 1 || !lnl.CanAddSendSockets) return;
+
+            // A probe is outstanding: the last socket is on trial, and nothing else gets added
+            // until it has answered for itself.
+            if (_probePending)
+            {
+                if (nowTick < _probeDeadlineTick) return;
+                _probePending = false;
+
+                double improvement = _dropRateAtGrow > 0
+                    ? (_dropRateAtGrow - _dropRateEma) / _dropRateAtGrow
+                    : 1.0;
+
+                if (improvement < SocketProbeMustImproveBy)
+                {
+                    _socketGrowthHelpless = true;
+                    _dropRateAtGiveUp = _dropRateEma;
+                    BNL.LogWarning(
+                        $"[CPU] Added a send socket ({lnl.BoundSendSocketCount} now) and the drop rate did not " +
+                        $"improve ({_dropRateAtGrow:F0} -> {_dropRateEma:F0} drops/s). More receive threads are " +
+                        $"not the fix -- raise sysctl net.core.rmem_max, or the link itself is saturated. " +
+                        $"Socket growth paused.");
+                }
+                else
+                {
+                    BNL.Log($"[CPU] Send socket {lnl.BoundSendSocketCount} cut the drop rate " +
+                            $"{_dropRateAtGrow:F0} -> {_dropRateEma:F0} drops/s.");
+                }
+            }
+
+            // Giving up is not permanent — it was a verdict about one load level. If drops get
+            // substantially worse than they were when growth was paused, the situation has changed
+            // enough to be worth testing again.
+            if (_socketGrowthHelpless)
+            {
+                if (_dropRateEma <= _dropRateAtGiveUp * 2.0 + 1.0) return;
+                _socketGrowthHelpless = false;
+                BNL.Log($"[CPU] Drop rate rose to {_dropRateEma:F0}/s since socket growth was paused; retrying.");
+            }
+
+            if (lnl.BoundSendSocketCount >= MaxSendSockets) return;
+
+            // Receive-side saturation is the other reason to add a socket, and it is the one that
+            // matters most on hosts with many weak cores: a single receive thread is one core's
+            // worth of syscall throughput, and past that the kernel simply discards datagrams. That
+            // never appears as high CPU — the thread is pinned either way — so it has to be read
+            // from the drop counter. Each extra SO_REUSEPORT socket is another receive thread with
+            // the kernel hashing flows across them.
+            bool receiveDropping = _dropRateEma > 0;
+
+            bool sendPoolPinned = parallelOptions.MaxDegreeOfParallelism >= BasisCpuBudget.ReductionSendCap;
+            bool tickBehind = _tickOverrunRatio > OverrunEscalateRatio || _sliceCount > 1;
+            bool machineHasRoom = utilization > 0 && utilization < 0.80;
+
+            // Drops bypass the machine-has-room test on purpose. Losing inbound packets is worse
+            // than being busy, and the fix is a thread that spends its life blocked in recvfrom.
+            bool sendPathLimited = sendPoolPinned && tickBehind && machineHasRoom;
+
+            if (!(sendPathLimited || receiveDropping))
+            {
+                _sendPressureStreak = 0;
+                return;
+            }
+
+            // Drops are already evidence of sustained trouble — the monitor samples over 10s — so
+            // they do not have to wait out the streak that send-side pressure does.
+            if (receiveDropping) _sendPressureStreak = SendPressureStreakToGrow;
+
+            if (++_sendPressureStreak < SendPressureStreakToGrow) return;
+            if (nowTick - _lastSocketGrowTick < SocketGrowSettleTicks) return;
+
+            _sendPressureStreak = 0;
+            _lastSocketGrowTick = nowTick;
+
+            if (lnl.TryAddSendSocket())
+            {
+                BasisCpuBudget.SetSendSocketCount(lnl.BoundSendSocketCount);
+                BNL.Log($"[CPU] Send path was the limit — added a socket, now {lnl.BoundSendSocketCount} " +
+                        $"(send workers may rise to {BasisCpuBudget.ReductionSendCap}).");
+
+                // Only drop-driven growth gets put on trial. Send-side pressure is judged by the
+                // tick making its budget, which the next rebalance already re-reads; drops are the
+                // case where the symptom can persist for reasons another thread cannot touch.
+                if (receiveDropping)
+                {
+                    _dropRateAtGrow = _dropRateEma;
+                    _probeDeadlineTick = nowTick + SocketProbeWindowTicks;
+                    _probePending = true;
+                }
+            }
+        }
+
+        private static readonly long SocketGrowSettleTicks = (long)(SocketGrowSettleMs * MsToTick);
+        private static readonly long SocketProbeWindowTicks = (long)(SocketProbeWindowMs * MsToTick);
+
+        private static long _lastPoolLoadLogTick;
+        private static readonly long PoolLoadLogIntervalTicks = (long)(15000 * MsToTick);
 
         // Distance cache: recalculate quality/interval from distance every N ticks.
         // The fast send loop uses cached values instead of computing distance per pair per tick.
@@ -709,16 +1114,17 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
             long phaseTick = profiling ? Stopwatch.GetTimestamp() : 0;
 
             // Phase 1: Drain
-            // Swap to the back-buffer so inbound threads write to the cleared dictionary.
-            // No allocation per tick — just swap and drain.
-            _backMessages.Clear();
-            var batch = Interlocked.Exchange(ref currentMessages, _backMessages);
-            _backMessages = batch;
+            // Take everything queued since the last tick, removing as we go.
+            //
+            // This used to double-buffer: clear the back dictionary, swap it in, then read the
+            // old one. The swap was free but the clear was not — ConcurrentDictionary.Clear takes
+            // every bucket lock and rebuilds the table, so the cost was set by shard count rather
+            // than by how much was queued. Draining ~19 messages several hundred times a second
+            // made that the most contended thing on the tick thread. Removing exactly the keys we
+            // drain is proportional to the traffic and takes one bucket lock at a time; anything
+            // written mid-drain lands on the next tick, exactly as it did under the swap.
             _messagesSnapshot.Clear();
-            foreach (var kvp in batch)
-            {
-                _messagesSnapshot.Add(kvp.Value);
-            }
+            currentMessages.DrainInto(_messagesSnapshot);
             if (profiling) { BSRProfiler.drainTicks += Stopwatch.GetTimestamp() - phaseTick; phaseTick = Stopwatch.GetTimestamp(); }
 
             // Phase 2: Process messages (static delegate avoids closure allocation per tick)
@@ -750,10 +1156,21 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
 
             //Phase 3: Send loop
             long now = Stopwatch.GetTimestamp();
+            _lastSendPairs = 0;
             UpdateCommunicationAndDistances(now);
+            long sendPhaseTicks = Stopwatch.GetTimestamp() - now;
             if (profiling)
             {
                 BSRProfiler.updateTicks += Stopwatch.GetTimestamp() - phaseTick; phaseTick = Stopwatch.GetTimestamp();
+            }
+
+            // Pairs served per millisecond this phase was busy — the signal the core allocator uses
+            // to find the width past which more send workers stop helping. Timed unconditionally
+            // rather than under `profiling`, because the allocator runs on every server and a
+            // measurement that only exists when someone is profiling is not one it can steer on.
+            if (_lastSendPairs > 0)
+            {
+                BasisCpuBudget.ReductionSendLease.AddWork(_lastSendPairs, sendPhaseTicks / MsToTick);
             }
 
             //Phase 4: Network I/O
@@ -796,6 +1213,13 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
             _tickWindowCount++;
             if (elapsedMs > intervalMs) _tickOverrunCount++;
 
+            // Duty cycle of this pool: work time against the period it is trying to hold. This is
+            // the currency the core allocator balances in — see RebalanceCpuBudget.
+            _tickDutyEma = _tickDutyEma <= 0.0
+                ? elapsedMs / Math.Max(1.0, intervalMs)
+                : _tickDutyEma * 0.9 + (elapsedMs / Math.Max(1.0, intervalMs)) * 0.1;
+            RebalanceCpuBudget(startTick);
+
             if (_tickWindowCount >= TickControlWindow)
             {
                 _tickOverrunRatio = _tickOverrunCount / (double)_tickWindowCount;
@@ -825,12 +1249,15 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
             {
                 intervalMs = Math.Min(MaxTickIntervalMs, intervalMs + 2L * escalationSteps);
             }
-            else if (comfortable && intervalMs > MinTickIntervalMs
+            else if (comfortable && intervalMs > AdaptiveMinIntervalMs
                      && _sliceCount == 1 && _loadShedTier == 0)
             {
                 // Only tighten the period once nothing is being degraded — otherwise the loop would
                 // speed back up while still dropping players, which is the wrong order of recovery.
-                intervalMs = Math.Max(MinTickIntervalMs, intervalMs - 1);
+                //
+                // Stops at the period the send intervals actually justify, not at the absolute
+                // floor: past that point the extra ticks find nothing due and just pay barriers.
+                intervalMs = Math.Max(AdaptiveMinIntervalMs, intervalMs - 1);
             }
 
             if (overloaded)
@@ -913,13 +1340,19 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
             {
                 removalsThisTick++;
                 _uplinkStates.TryRemove(id, out _);
+                // Admin bypass is per-player-session; LiteNetLib recycles ids, so a stale entry
+                // would silently grant the next player on this id full-quality broadcast.
+                _bypassReductionIds.TryRemove(id, out _);
                 if (playerStates.TryRemove(id, out var removedState))
                 {
                     removedState.IsActive = false;
 
                     // Return pooled arrays to ArrayPool
                     if (removedState.AvatarHigh.array != null)
+                    {
                         ArrayPool<byte>.Shared.Return(removedState.AvatarHigh.array);
+                        removedState.AvatarHigh.array = null;
+                    }
                     if (removedState.BundleRawScratch != null)
                     {
                         ArrayPool<byte>.Shared.Return(removedState.BundleRawScratch);
@@ -1142,6 +1575,12 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
                 return;
             }
 
+            // Retune workers to the current population before the phase that uses them.
+            TuneParallelism(playerCount);
+
+            // Advance the sender visit order so queue trims do not always fall on the same players.
+            _senderRotation++;
+
             // Snapshot generation counters only (positions handled by slow distance cache).
             int maxId = 0;
             for (int i = 0; i < playerCount; i++)
@@ -1180,6 +1619,12 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
                 return;
             }
 
+            // Sender/receiver pairs this pass will consider — the unit the send phase's cost
+            // actually scales in. Receivers alone would be the wrong unit: the per-receiver cost is
+            // proportional to the roster, so a population change mid-measurement would look like a
+            // change in how well the pool parallelises.
+            _lastSendPairs = (long)(end - start) * playerCount;
+
             bool bundlingEnabled = EnableAvatarBundleCompression;
 
             Parallel.For(start, end, parallelOptions, i =>
@@ -1207,8 +1652,22 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
                 // Thread-local send counter — no Interlocked in the hot loop
                 long localSends = 0;
 
-                for (int index = 0; index < playerCount; index++)
+                // Senders are visited from a rotating offset, not always from index 0.
+                //
+                // The order senders are visited in is the order their packets enter the receiver's
+                // send queue, and when that queue is over budget it discards from the front — the
+                // oldest, which is whatever went in earliest. With a fixed starting index and a
+                // stable roster that is the same handful of players on every tick of every
+                // receiver, so an overloaded server did not degrade everyone slightly: it stopped
+                // sending a specific subset of people almost entirely, and they froze in place for
+                // everyone else. Rotating the start spreads that cost across the population.
+                int rotation = playerCount > 0 ? (int)((uint)_senderRotation % (uint)playerCount) : 0;
+
+                for (int step = 0; step < playerCount; step++)
                 {
+                    int index = step + rotation;
+                    if (index >= playerCount) index -= playerCount;
+
                     int jId = activeCopy[index].id;
                     if (id == jId)
                     {
@@ -1388,10 +1847,10 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
                     FlushPendingForReceiver(stateI, peer, bundlingEnabled);
                 }
 
-                // One Interlocked.Add per receiver (not per send) — ~25 atomics/tick instead of ~32K
+                // Per-thread block, folded in once per window — no atomic at all on this path.
                 if (localSends > 0 && BSRProfiler.Enabled)
                 {
-                    Interlocked.Add(ref BSRProfiler.SendCount, localSends);
+                    BSRProfiler.Local.Sends += localSends;
                 }
             });
         }
@@ -1569,30 +2028,56 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
             // "fallback because bundling produced nothing" (cursor == 0 with bundling enabled).
             if (BSRProfiler.Enabled && tailSent > 0)
             {
-                Interlocked.Add(ref BSRProfiler.bundleTailUncompressed, tailSent);
+                var counters = BSRProfiler.Local;
+                counters.BundleTailUncompressed += tailSent;
                 if (bundlingEnabled && cursor == 0 && count >= AvatarBundleMinMessages)
                 {
-                    Interlocked.Increment(ref BSRProfiler.bundleFallbacks);
+                    counters.BundleFallbacks++;
                 }
             }
-            // Clear the payload references, not just the count. PendingSends grows to the player
-            // count and is never shrunk, so leaving the Source pointers behind keeps ~1M dead
-            // references reachable at 1000 players — every GC has to trace them, and they pin the
-            // serialized payloads of players who may already have disconnected.
+            // Clear the payload references, not just the count. Leaving the Source pointers behind
+            // keeps ~1M dead references reachable at 1000 players — every GC has to trace them, and
+            // they pin the serialized payloads of players who may already have disconnected.
             for (int i = 0; i < count; i++)
             {
                 pending[i].Source = null;
             }
             stateI.PendingCount = 0;
 
-            // Return tick-scoped scratch buffers to the pool. Without this they'd retain
-            // ~85KB+ per PlayerState forever (LOH at 1k+ players, gen2 pause amplifier).
-            if (stateI.BundleRawScratch != null)
+            // Give back a buffer that a busy spell grew and quiet ticks no longer justify.
+            //
+            // This array only ever grew before, sized by the worst tick a receiver had ever seen
+            // and kept at that size forever — 223 MB across 4000 players, most of it untouched.
+            // The peak is tracked over a window rather than reacting to one tick, so a receiver
+            // that is periodically busy does not thrash between sizes.
+            stateI.PendingPeak = Math.Max(stateI.PendingPeak, count);
+            if (++stateI.PendingPeakTicks >= PendingShrinkWindowTicks)
+            {
+                stateI.PendingPeakTicks = 0;
+                int want = Math.Max(PendingMinCapacity, stateI.PendingPeak * 2);
+                if (pending.Length > want * 2)
+                {
+                    stateI.PendingSends = new PendingAvatarSend[want];
+                }
+                stateI.PendingPeak = 0;
+            }
+
+            // Keep modest scratch buffers between ticks; only hand back the oversized ones.
+            //
+            // These used to be returned unconditionally, which meant a rent and a return per
+            // receiver per tick — at 1000 players that is ~330K operations a second against
+            // ArrayPool.Shared, and its bucket contention showed up in the profile as spin-waiting
+            // inside this method. Retaining the common small case removes nearly all of it.
+            //
+            // The cap is what keeps the original concern honest: a receiver that needed a huge
+            // buffer for one tick gives it straight back, so nothing pins LOH-sized arrays per
+            // player. Steady state is a few KB each, and disconnect returns whatever is held.
+            if (stateI.BundleRawScratch != null && stateI.BundleRawScratch.Length > RetainedScratchBytes)
             {
                 ArrayPool<byte>.Shared.Return(stateI.BundleRawScratch);
                 stateI.BundleRawScratch = null;
             }
-            if (stateI.BundleCompressedScratch != null)
+            if (stateI.BundleCompressedScratch != null && stateI.BundleCompressedScratch.Length > RetainedScratchBytes)
             {
                 ArrayPool<byte>.Shared.Return(stateI.BundleCompressedScratch);
                 stateI.BundleCompressedScratch = null;
@@ -1662,7 +2147,7 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
                 int retryRawLen = BuildRawForRange(stateI, pending, cursor, retryEnd);
                 if (retryRawLen < AvatarBundleMinBytes) break;
 
-                if (BSRProfiler.Enabled) Interlocked.Increment(ref BSRProfiler.bundleRetries);
+                if (BSRProfiler.Enabled) BSRProfiler.Local.BundleRetries++;
                 if (!TryDeflateAndEmit(stateI, peer, cursor, retryEnd, retryRawLen, budget, ref bundleCount, ref bundleBytes, out int retryCompressed))
                 {
                     // Two failures in a row — give up on bundling for this receiver this tick;
@@ -1764,7 +2249,7 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
                 compressed.AsSpan(BundleHeaderSize, compressed.Length - BundleHeaderSize),
                 LZ4Level.L00_FAST);
 
-            if (profiling) Interlocked.Add(ref BSRProfiler.bundleDeflateTicks, Stopwatch.GetTimestamp() - deflateStart);
+            if (profiling) BSRProfiler.Local.BundleDeflateTicks += Stopwatch.GetTimestamp() - deflateStart;
 
             if (compressedLen <= 0 || compressedLen > budget)
             {
@@ -1782,10 +2267,11 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
 
             if (profiling)
             {
-                Interlocked.Increment(ref BSRProfiler.bundlesEmitted);
-                Interlocked.Add(ref BSRProfiler.bundleMessages, chunkCount);
-                Interlocked.Add(ref BSRProfiler.bundleRawBytes, rawLen);
-                Interlocked.Add(ref BSRProfiler.bundleCompressedBytes, compressedLen);
+                var counters = BSRProfiler.Local;
+                counters.BundlesEmitted++;
+                counters.BundleMessages += chunkCount;
+                counters.BundleRawBytes += rawLen;
+                counters.BundleCompressedBytes += compressedLen;
             }
             return true;
         }
@@ -2025,6 +2511,18 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
             }
 
             var pos = BasisNetworkCompressionExtensions.ReadPosition(ref poolMsg.array);
+
+            // A message can outlive its sender: removals drain at MaxRemovalsPerTick, and a stale
+            // frame drained after its player's removal used to recreate PlayerState around the dead
+            // NetPeer — pinning the peer (channels, merge buffer) plus a fresh 64 KB tracking array
+            // until the id happened to be reused. Only ever create state for the peer that
+            // currently owns the id.
+            if (!playerStates.TryGetValue(id, out _) &&
+                (!NetworkServer.AuthenticatedPeers.TryGetValue(id, out NetPeer livePeer) || !ReferenceEquals(livePeer, message.FromPeer)))
+            {
+                QueuedMessagePool.Return(message);
+                return;
+            }
 
             // Deep-copy the avatar payload so state.AvatarHigh owns its own buffer.
             // Without this copy, QueuedMessagePool.Return() preserves the byte[] and
@@ -2746,6 +3244,35 @@ namespace BasisNetworkServer.BasisNetworkingReductionSystem
         public void Clear()
         {
             for (int i = 0; i < _shards.Length; i++) _shards[i].Clear();
+        }
+
+        /// <summary>
+        /// Moves every value into <paramref name="destination"/> and empties the dictionary.
+        ///
+        /// Deliberately not <see cref="Clear"/>: ConcurrentDictionary.Clear takes every bucket
+        /// lock in the shard and rebuilds its table, so clearing all shards cost the same whether
+        /// it held one message or a thousand. The tick loop drains ~19 messages several hundred
+        /// times a second, and that fixed cost was the single most contended thing on the tick
+        /// thread. Removing the keys we actually drained is proportional to the data instead, and
+        /// only ever touches one bucket at a time.
+        ///
+        /// Anything written while this runs is simply picked up by the next drain, which is the
+        /// same guarantee the previous swap-and-clear gave.
+        /// </summary>
+        public void DrainInto(System.Collections.Generic.List<TValue> destination)
+        {
+            for (int i = 0; i < _shards.Length; i++)
+            {
+                var shard = _shards[i];
+                if (shard.IsEmpty) continue;
+                foreach (var kvp in shard)
+                {
+                    if (shard.TryRemove(kvp.Key, out var value))
+                    {
+                        destination.Add(value);
+                    }
+                }
+            }
         }
 
         public System.Collections.Generic.IEnumerator<System.Collections.Generic.KeyValuePair<int, TValue>> GetEnumerator()

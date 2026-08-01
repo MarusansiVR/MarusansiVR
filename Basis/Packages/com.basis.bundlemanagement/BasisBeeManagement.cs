@@ -77,12 +77,31 @@ public static class BasisBeeManagement
         (BasisBundleGenerated, byte[], string) output;
         if (shouldUseOnDiskMeta)
         {
-            BasisDebug.Log("Process On Disc Meta Data Async", BasisDebug.LogTag.Event);
             output = await BasisBundleManagement.LocalLoadBundleConnector(wrapper, MetaInfo.StoredLocal, report, cancellationToken);
         }
         else
         {
             BasisDebug.Log("Download Store Meta And Bundle", BasisDebug.LogTag.Event);
+            // First-time download: fetch the connector alone first (two small ranged
+            // requests). It carries the far avatar payload, so a player can appear as their
+            // own silhouette within moments while the full bundle downloads behind it.
+            // UniqueVersion check, not null: network-converted bundles carry an EMPTY
+            // connector husk that would otherwise read as "already have one".
+            if (string.IsNullOrEmpty(wrapper.LoadableBundle.BasisBundleConnector?.UniqueVersion))
+            {
+                try
+                {
+                    var (connector, connectorError) = await BasisBundleManagement.DownloadConnectorFile(wrapper, new BasisProgressReport(), cancellationToken, MaxDownloadSizeInBytes);
+                    if (connector == null)
+                    {
+                        BasisDebug.Log($"Connector prefetch unavailable ({connectorError}) — continuing with the full download.", BasisDebug.LogTag.Event);
+                    }
+                }
+                catch (Exception prefetchException)
+                {
+                    BasisDebug.Log($"Connector prefetch failed ({prefetchException.Message}) — continuing with the full download.", BasisDebug.LogTag.Event);
+                }
+            }
             output = await BasisBundleManagement.DownloadLoadBundleConnector(wrapper, report, cancellationToken, MaxDownloadSizeInBytes);
         }
         if(output.Item2 == null || output.Item2.Length == 0)
@@ -96,6 +115,38 @@ public static class BasisBeeManagement
         if (output.Item1 == null || output.Item3 != string.Empty)
         {
             throw new Exception($"Bundle load failed for {wrapper?.LoadableBundle?.BasisRemoteBundleEncrypted?.RemoteBeeFileLocation ?? "unknown"}: {output.Item3}");
+        }
+        // Generic (glTF) fallback section: no AssetBundle exists for this platform, the bytes
+        // are an encrypted glb. Build the template instead of an AssetBundle, with the same
+        // cache-refresh retry the bundle path gets for stale cached bytes.
+        if (BasisBundleConnector.IsGltfMode(output.Item1))
+        {
+            if (wrapper.HasGltfTemplate)
+            {
+                return;
+            }
+            bool gltfLoaded = await BasisGltfAvatarLoader.LoadTemplate(wrapper, output.Item1, output.Item2, report);
+            if (!gltfLoaded && shouldUseOnDiskMeta && !didForceRedownload)
+            {
+                BasisDebug.Log("Cached generic (glTF) bytes failed to load; forcing re-download.", BasisDebug.LogTag.Event);
+                output = await BasisBundleManagement.DownloadLoadBundleConnector(wrapper, report, cancellationToken, MaxDownloadSizeInBytes);
+                didForceRedownload = true;
+
+                if (output.Item1 == null || output.Item2 == null || output.Item2.Length == 0 || !string.IsNullOrEmpty(output.Item3))
+                {
+                    throw new Exception($"Unable to reload generic (glTF) section after cache mismatch. {output.Item3}");
+                }
+
+                gltfLoaded = await BasisGltfAvatarLoader.LoadTemplate(wrapper, output.Item1, output.Item2, report);
+            }
+
+            if (!gltfLoaded)
+            {
+                throw new Exception($"Generic (glTF) avatar template creation failed for {wrapper?.LoadableBundle?.BasisRemoteBundleEncrypted?.RemoteBeeFileLocation ?? "unknown"}.");
+            }
+
+            await SaveMetaIfNeeded(wrapper, shouldUseOnDiskMeta, didForceRedownload, output.Item1.Platform);
+            return;
         }
         IEnumerable<AssetBundle> AssetBundles = AssetBundle.GetAllLoadedAssetBundles();
         foreach (AssetBundle assetBundle in AssetBundles)
@@ -176,6 +227,17 @@ public static class BasisBeeManagement
             throw new Exception($"Local bundle load returned no section data for {localBeePath}.");
         }
 
+        // Generic (glTF) fallback section from a local bee — same template path as remote.
+        if (BasisBundleConnector.IsGltfMode(output.Item1))
+        {
+            bool gltfLoaded = await BasisGltfAvatarLoader.LoadTemplate(wrapper, output.Item1, output.Item2, report);
+            if (!gltfLoaded)
+            {
+                throw new Exception($"Generic (glTF) avatar template creation failed for local bee file {localBeePath}.");
+            }
+            return;
+        }
+
         string assetToLoadName = output.Item1.AssetToLoadName;
         if (string.IsNullOrEmpty(assetToLoadName))
         {
@@ -250,7 +312,6 @@ public static class BasisBeeManagement
         (BasisBundleConnector Connector, string ErrorMessage) output;
         if (IsMetaOnDisc)
         {
-            BasisDebug.Log("Process On Disc Meta Data Async", BasisDebug.LogTag.Event);
             output = await BasisBundleManagement.ReadConnectorFile(wrapper, MetaInfo.StoredLocal, report, cancellationToken).ConfigureAwait(false);
         }
         else
@@ -276,7 +337,14 @@ public static class BasisBeeManagement
             BasisBEEExtensionMeta newDiscInfo = new BasisBEEExtensionMeta
             {
                 StoredRemote = wrapper.LoadableBundle.BasisRemoteBundleEncrypted,
-                StoredLocal = wrapper.LoadableBundle.BasisLocalEncryptedBundle,
+                // Connector-only load: no platform section was written to disk. Snapshot only
+                // what actually exists — carrying the wrapper's pre-generated bee path here
+                // made the full-load path read a file that was never downloaded.
+                StoredLocal = new BasisStoredEncryptedBundle
+                {
+                    DownloadedConnectorFileLocation = wrapper.LoadableBundle.BasisLocalEncryptedBundle?.DownloadedConnectorFileLocation,
+                    DownloadedBeeFileLocation = string.Empty,
+                },
                 UniqueVersion = wrapper.LoadableBundle.BasisBundleConnector.UniqueVersion,
                 DownloadedPlatform = BasisIOManagement.GetCurrentCachePlatform(),
             };

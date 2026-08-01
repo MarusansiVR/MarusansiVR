@@ -10,7 +10,7 @@ public class BasisLoadableConfigurationWindow : EditorWindow
 {
     const string ModeTooltip =
         "What the server tells clients to do with this entry.\n\n" +
-        "0 = Prop — loads the bee file as a GameObject and spawns it at the Position/Rotation/Scale below, checked against prop content limits.\n" +
+        "0 = Prop — loads the bee file as a GameObject and spawns it at the Position/Rotation below, checked against prop content limits. Scale only applies when the XML carries ModifyScale.\n" +
         "1 = Scene — loads the bee file as a world/scene. The transform below is ignored.\n" +
         "2 = Avatar — loads the bee file as a GameObject checked against avatar content limits. The transform below is not sent for this mode.\n\n" +
         "Any other value is rejected by the client.";
@@ -32,7 +32,7 @@ public class BasisLoadableConfigurationWindow : EditorWindow
     bool persist = true;
 
     // UI
-    [MenuItem("Basis/Settings/Loadable Config")]
+    [MenuItem("Basis/Settings/Loadable Config", false, 403)]
     public static void ShowWindow()
     {
         var win = GetWindow<BasisLoadableConfigurationWindow>("Basis Config");
@@ -41,7 +41,9 @@ public class BasisLoadableConfigurationWindow : EditorWindow
 
     void OnGUI()
     {
-        EditorGUILayout.LabelField("Basis Loadable Configuration", EditorStyles.boldLabel);
+        BasisEditorUI.Header("Loadable Config",
+            "The config file the client loads at boot — edit it here instead of by hand.");
+
         EditorGUILayout.Space();
 
         using (new EditorGUILayout.VerticalScope("box"))
@@ -57,7 +59,7 @@ public class BasisLoadableConfigurationWindow : EditorWindow
         EditorGUILayout.Space();
         using (new EditorGUILayout.VerticalScope("box"))
         {
-            EditorGUILayout.LabelField("Transform", EditorStyles.boldLabel);
+            BasisEditorUI.SectionTitle("Transform");
             Selectedposition = EditorGUILayout.Vector3Field("Position (X,Y,Z)", Selectedposition);
 
             // Quaternion fields (explicit)
@@ -88,14 +90,14 @@ public class BasisLoadableConfigurationWindow : EditorWindow
         }
 
         EditorGUILayout.Space();
-        EditorGUILayout.HelpBox("Tip: This window writes the XML with the same comments and element order as your example.", MessageType.Info);
+        BasisEditorUI.Help("Tip: This window writes the XML with the same comments and element order as your example.", MessageType.Info);
     }
 
     static string DescribeMode(int mode)
     {
         switch (mode)
         {
-            case 0: return "Prop — spawned as a GameObject at the transform below.";
+            case 0: return "Prop — spawned as a GameObject at the position and rotation below.";
             case 1: return "Scene — loaded as a world. The transform below is ignored.";
             case 2: return "Avatar — spawned as a GameObject under avatar content limits. The transform below is not sent.";
             default: return "Unknown mode — clients reject this and load nothing.";

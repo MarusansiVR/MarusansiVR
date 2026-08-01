@@ -140,7 +140,7 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
     /// culling mask so it is the single source of truth — the Render Layers "Nameplates" toggle
     /// and this can never disagree.
     /// </summary>
-    public bool ShowUIInCapture => captureCamera != null && uiLayerMask != 0 && (captureCamera.cullingMask & uiLayerMask) != 0;
+    public bool ShowUIInCapture => captureCamera != null && uiLayerMask != 0 && (WorldCullingMask & uiLayerMask) != 0;
 
     /// <summary>Last visibility state reported by the mesh renderer check.</summary>
     public bool LastVisibilityState = false;
@@ -256,9 +256,9 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
 
         SubscribePreviewScreen();
 
-        // Ordered late phase instead of Unity's LateUpdate, so this always runs after the camera
+        // Ordered render phase instead of Unity's LateUpdate, so this always runs after the camera
         // has been moved for the frame rather than racing it.
-        BasisLocalPlayer.AfterSimulateOnLate.AddAction(SimulateLatePriority, SimulateLate);
+        BasisLocalPlayer.AfterSimulateOnRender.AddAction(SimulateLatePriority, SimulateLate);
 
         RenderPipelineManager.beginCameraRendering += OnBeginCameraRendering;
         BasisDeviceManagement.OnBootModeChanged += OnBootModeChanged;
@@ -336,7 +336,7 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
         }
         
 
-        BasisLocalPlayer.AfterSimulateOnLate.RemoveAction(SimulateLatePriority, SimulateLate);
+        BasisLocalPlayer.AfterSimulateOnRender.RemoveAction(SimulateLatePriority, SimulateLate);
 
         RenderPipelineManager.beginCameraRendering -= OnBeginCameraRendering;
         BasisDeviceManagement.OnBootModeChanged -= OnBootModeChanged;
@@ -488,6 +488,7 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
         SetCameraHidden(false);
         SetAutoFollowEnabled(false);
         PinSpace = CameraPinSpace.HandHeld;
+        AcquireCursorLock();
     }
 
     /// <summary>Forward distance the camera spawns at, matching the Photo Camera catalog offset (0,0,0.5).</summary>
@@ -564,7 +565,7 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
     public bool IsCaptureLayerEnabled(int layer)
     {
         if (captureCamera == null || layer < 0 || layer > 31) return false;
-        return (captureCamera.cullingMask & (1 << layer)) != 0;
+        return (WorldCullingMask & (1 << layer)) != 0;
     }
 
     /// <summary>
@@ -575,8 +576,8 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
     public void SetCaptureLayerEnabled(int layer, bool enabled)
     {
         if (captureCamera == null || !IsCaptureLayerUserTogglable(layer)) return;
-        if (enabled) captureCamera.cullingMask |= 1 << layer;
-        else captureCamera.cullingMask &= ~(1 << layer);
+        if (enabled) WorldCullingMask |= 1 << layer;
+        else WorldCullingMask &= ~(1 << layer);
     }
 
     /// <summary>Fetches Tonemapping from the profile and sets default mode.</summary>
@@ -1020,15 +1021,22 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
             return;
         }
 
-        if ((captureCamera.cullingMask & uiLayerMask) != 0)
-            captureCamera.cullingMask &= ~uiLayerMask;
+        if ((WorldCullingMask & uiLayerMask) != 0)
+            WorldCullingMask &= ~uiLayerMask;
         else
-            captureCamera.cullingMask |= uiLayerMask;
+            WorldCullingMask |= uiLayerMask;
     }
 
     /// <summary>Immediate photo capture using the current format choice (EXR/PNG).</summary>
     public void CapturePhoto()
     {
+        // Refused before the shutter sound so a locked capture doesn't look like it worked.
+        if (BasisNetworkModeration.CameraCaptureBlockedLocally)
+        {
+            BasisDebug.LogWarning("CapturePhoto blocked: camera capture is locked by an admin.", BasisDebug.LogTag.Camera);
+            return;
+        }
+
         TextureFormat format;
         RenderTextureFormat renderFormat;
 
@@ -1073,18 +1081,18 @@ public partial class BasisHandHeldCamera : BasisHandHeldCameraInteractable
     public bool IsDirectToScreen => IsOverridingDesktopView;
     private BasisRenderRateLimiter renderRateLimiter;
 
-    /// <summary>Late-phase priority: after the camera has been moved (202) and the PIP driver (203).</summary>
+    /// <summary>Render-phase priority: after the camera has been moved (202).</summary>
     private const int SimulateLatePriority = 204;
 
     /// <summary>
-    /// Per-frame camera upkeep, run from <see cref="BasisLocalPlayer.AfterSimulateOnLate"/> rather
+    /// Per-frame camera upkeep, run from <see cref="BasisLocalPlayer.AfterSimulateOnRender"/> rather
     /// than a Unity LateUpdate.
     /// <para>
     /// Everything here reads the capture camera's pose — the preview screen, the detached marker,
-    /// and the networked PIP position. The camera is moved by UpdateCamera at priority 202 inside
-    /// the player's own late simulate, so a plain LateUpdate raced it: with no script execution
-    /// order set, this could run either side of the move and would intermittently publish and
-    /// place things from the previous frame's pose. That inconsistency read as jitter.
+    /// and the networked PIP position. The camera is moved by UpdateCamera at priority 202 in the
+    /// same render phase, so a plain LateUpdate raced it: with no script execution order set, this
+    /// could run either side of the move and would intermittently publish and place things from the
+    /// previous frame's pose. That inconsistency read as jitter.
     /// </para>
     /// </summary>
     private void SimulateLate()

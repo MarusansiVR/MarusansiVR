@@ -49,7 +49,7 @@ public struct JiggleJobBulkTransformReset : IJobParallelForTransform {
         if (localTransform.isVirtual) {
             return;
         }
-        
+
         switch(GetChangedFlags(localTransform.position, localPosition, localTransform.rotation, localRotation)) {
             case ChangeFlags.Position:
                 transform.localRotation = restTransform.rotation;

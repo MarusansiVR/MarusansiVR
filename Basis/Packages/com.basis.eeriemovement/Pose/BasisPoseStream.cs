@@ -174,10 +174,42 @@ namespace Basis.IK
             rotation = r;
         }
 
+        /// <summary>
+        /// math.normalizesafe returns identity for a degenerate quaternion, but returns exactly
+        /// (0,0,0,0) when lengthsq overflows to infinity: its guard is len &gt; FLT_MIN_NORMAL, which
+        /// infinity passes, and the normalize branch then evaluates x * rsqrt(inf) = x * 0. Inverting
+        /// a near-zero rotation produces components large enough to do that, and a zero quaternion is
+        /// finite, so every isfinite check downstream passes it through to the transform.
+        /// Dividing by the largest component first keeps the overflow case pointing the right way
+        /// instead of dropping the frame, so a healthy solve is bit-stable through this.
+        /// </summary>
+        public static quaternion SafeNormalize(quaternion q)
+        {
+            float4 x = q.value;
+            float lengthSq = math.lengthsq(x);
+            if (math.isfinite(lengthSq))
+            {
+                return lengthSq > math.FLT_MIN_NORMAL
+                    ? new quaternion(x * math.rsqrt(lengthSq))
+                    : quaternion.identity;
+            }
+
+            float scale = math.cmax(math.abs(x));
+            if (!math.isfinite(scale) || scale <= 0f)
+            {
+                return quaternion.identity;
+            }
+            x /= scale;
+            float rescaledLengthSq = math.lengthsq(x);
+            return math.isfinite(rescaledLengthSq) && rescaledLengthSq > math.FLT_MIN_NORMAL
+                ? new quaternion(x * math.rsqrt(rescaledLengthSq))
+                : quaternion.identity;
+        }
+
         public void SetWorldRotation(int index, Quaternion rotation)
         {
             GetParentWorld(index, out _, out quaternion parentRotation, out _);
-            LocalRotation[index] = math.normalizesafe(math.mul(math.inverse(parentRotation), (quaternion)rotation));
+            LocalRotation[index] = SafeNormalize(math.mul(math.inverse(parentRotation), (quaternion)rotation));
         }
 
         public void SetWorldPosition(int index, Vector3 position)
