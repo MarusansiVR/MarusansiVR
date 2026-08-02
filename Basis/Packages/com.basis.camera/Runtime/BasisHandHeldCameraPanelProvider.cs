@@ -22,6 +22,19 @@ namespace Basis.BasisUI.HandHeldCamera
         // Ordered to match BasisCameraDetachedMarker (Off / Puck / Wireframe).
         private static readonly string[] DetachedMarkerLabels = { "Off", "Puck", "Wireframe" };
 
+        // Ordered to match URP's MotionBlurQuality and MotionBlurMode, which the UI stores as their
+        // index — a label reordered here silently picks a different enum entry.
+        private static readonly string[] MotionBlurQualityLabels = { "Low", "Medium", "High" };
+        private static readonly string[] MotionBlurQualityKeys =
+        {
+            "camera.motionBlurQuality.low", "camera.motionBlurQuality.medium", "camera.motionBlurQuality.high"
+        };
+        private static readonly string[] MotionBlurModeLabels = { "Camera Only", "Camera And Objects" };
+        private static readonly string[] MotionBlurModeKeys =
+        {
+            "camera.motionBlurMode.cameraOnly", "camera.motionBlurMode.cameraAndObjects"
+        };
+
         /// <summary>Preview height used until the row has a laid-out width to derive one from.</summary>
         private const float PreviewFallbackHeight = 320f;
 
@@ -37,6 +50,8 @@ namespace Basis.BasisUI.HandHeldCamera
         private RectTransform _navColumn;
         private readonly List<RectTransform> _pageContents = new List<RectTransform>();
         private readonly List<BasisPanelSearch> _searches = new List<BasisPanelSearch>();
+        private readonly List<string> _searchTabKeys = new List<string>();
+        private readonly List<BasisPanelSearchHit> _searchHits = new List<BasisPanelSearchHit>();
 
         /// <summary>Tab the panel was left on, so reopening it lands back where the user was.</summary>
         private static int _lastTabIndex;
@@ -99,6 +114,10 @@ namespace Basis.BasisUI.HandHeldCamera
         private PanelSlider _whiteBalanceTempSlider;
         private PanelSlider _whiteBalanceTintSlider;
         private PanelSlider _lensDistortionSlider;
+        private PanelSlider _motionBlurSlider;
+        private PanelSlider _motionBlurClampSlider;
+        private PanelDropdown _motionBlurQualityDropdown;
+        private PanelDropdown _motionBlurModeDropdown;
         private PanelDropdown _msaaDropdown;
 #if Basis_VOLUMETRIC_SUPPORTED
         private PanelSlider _fogSlider;
@@ -212,17 +231,30 @@ namespace Basis.BasisUI.HandHeldCamera
 
             panel.OnInstanceReleased += OnPanelClosed;
 
+            // Search lives on the header. The popup must not outlive this panel — it navigates into
+            // tabs that go away with it.
+            BasisPanelMoveHandle.SetPanelSearch(panel, Title, CollectSearchResults);
+            panel.OnInstanceReleased += BasisPanelSearchPopup.Close;
+
             _tabGroup = PanelTabGroup.CreateNew(panel.Descriptor.ContentParent, LayoutDirection.Vertical);
             _navColumn = _tabGroup.ExtrasContainer;
             _pageContents.Clear();
             _searches.Clear();
+            _searchTabKeys.Clear();
 
             BuildNavigationColumn(_navColumn);
+
+            // First, because a mode is the decision every other tab is downstream of: it sets them
+            // up for a job and colours them by the part each one plays in it.
+            AddTab("camera.modePreset", BuildModeTab);
 
             AddTab("camera.capture", content =>
             {
                 BuildActionsGroup(content);
                 PanelSectionToggleHelpers.FinalizeCollapsibleGroup(_actionSection, _actionGroup, true, OnSectionExpanded);
+
+                BuildBackgroundGroup(content);
+                PanelSectionToggleHelpers.FinalizeCollapsibleGroup(_backgroundSection, _backgroundGroup, false, OnSectionExpanded);
             });
 
             AddTab("camera.tab.image", content =>
@@ -270,6 +302,10 @@ namespace Basis.BasisUI.HandHeldCamera
 
             MakeSlidersLive((RectTransform)_tabGroup.transform);
             AssignSliderResetDefaults();
+
+            // After every tab: the section handles are assigned as each page is populated, so the
+            // tint list can only be complete once the last one has been built.
+            RegisterSectionTints();
 
             RebuildSelector();
 
@@ -356,12 +392,10 @@ namespace Basis.BasisUI.HandHeldCamera
             int index = _tabGroup.Pages.Count;
             _pageContents.Add(content);
 
-            BasisPanelSearch search = BasisPanelSearch.Attach(content);
-            _searches.Add(search);
-            if (search != null)
-            {
-                search.OnQueryChanged += query => MirrorSearchQuery(search, query);
-            }
+            // Headless: this page is searched from the panel header's Search button, so it keeps its
+            // whole height for controls instead of spending the first row on a field.
+            _searches.Add(BasisPanelSearch.AttachHeadless(content, page));
+            _searchTabKeys.Add(tabKey);
 
             PanelScrollMemory.Attach(content, scope);
             _tabGroup.AddTab(BasisLocalization.Get(tabKey), () => OnTabShown(index), page);
@@ -396,19 +430,56 @@ namespace Basis.BasisUI.HandHeldCamera
         /// here is not meant to reach the main Settings tabs. Each tab carries its own field; typing
         /// in one carries the query to the others, which only record it and filter when shown.
         /// </summary>
-        private void MirrorSearchQuery(BasisPanelSearch source, string query)
+        /// <summary>
+        /// Everything on this panel matching the query, for the header search popup. Scoped to the
+        /// camera's own tabs on purpose — a search opened here is about framing a shot, and should
+        /// not start turning up microphone settings.
+        /// </summary>
+        private void CollectSearchResults(string query, List<BasisPanelSearchResult> results)
         {
             for (int Index = 0; Index < _searches.Count; Index++)
             {
-                BasisPanelSearch other = _searches[Index];
-                if (other != null && other != source) other.SetQueryDeferred(query);
+                BasisPanelSearch search = _searches[Index];
+                if (search == null) continue;
+
+                search.Prepare();
+                search.CollectHits(query, _searchHits);
+
+                int tabIndex = Index;
+                string tabName = BasisLocalization.Get(_searchTabKeys[Index]);
+                for (int Hit = 0; Hit < _searchHits.Count; Hit++)
+                {
+                    BasisPanelSearchHit hit = _searchHits[Hit];
+                    string title = hit.Title;
+                    string section = hit.SectionTitle;
+                    PanelSectionToggle targetSection = hit.Section;
+
+                    results.Add(new BasisPanelSearchResult(
+                        title,
+                        string.IsNullOrEmpty(section) || section == title ? tabName : $"{tabName} › {section}",
+                        () => OpenSearchResult(tabIndex, targetSection, title)));
+                }
             }
+
+            _searchHits.Clear();
+        }
+
+        /// <summary>
+        /// Goes to the tab a result lives on and puts the row under the user's eye. Expanding comes
+        /// after the tab switch: a collapsed section rebuilds its rows on open, so the descriptor the
+        /// hit was collected from is already gone, which is why the scroll matches by title.
+        /// </summary>
+        private void OpenSearchResult(int tabIndex, PanelSectionToggle section, string title)
+        {
+            if (_tabGroup != null) _tabGroup.SetValue(tabIndex);
+            if (section != null) section.SetExpanded(true);
+
+            if (tabIndex >= 0 && tabIndex < _searches.Count) _searches[tabIndex]?.ScrollTo(title);
         }
 
         private void OnTabShown(int index)
         {
             _lastTabIndex = index;
-            if (index >= 0 && index < _searches.Count) _searches[index]?.ApplyPendingQuery();
         }
 
         private BasisPanelSearch ActiveSearch()
@@ -485,6 +556,8 @@ namespace Basis.BasisUI.HandHeldCamera
             _chromaticSlider?.SetResetDefault(0f);
             _filmGrainSlider?.SetResetDefault(0f);
             _lensDistortionSlider?.SetResetDefault(0f);
+            _motionBlurSlider?.SetResetDefault(defaults.motionBlurIntensity * 100f);
+            _motionBlurClampSlider?.SetResetDefault(defaults.motionBlurClamp * 100f);
 #if Basis_VOLUMETRIC_SUPPORTED
             _fogSlider?.SetResetDefault(defaults.VolumetricFogVolumedensity);
 #endif
@@ -559,11 +632,13 @@ namespace Basis.BasisUI.HandHeldCamera
             ApplyOnPropUIVisibility(false);
             SetPanelTickSubscription(false);
             ClearCinematicReferences();
+            ClearModeReferences();
             _panel = null;
             _tabGroup = null;
             _navColumn = null;
             _pageContents.Clear();
             _searches.Clear();
+            _searchTabKeys.Clear();
             _selector = null;
             _emptyState = null;
             _hiddenState = null;
@@ -597,6 +672,10 @@ namespace Basis.BasisUI.HandHeldCamera
             _whiteBalanceTempSlider = null;
             _whiteBalanceTintSlider = null;
             _lensDistortionSlider = null;
+            _motionBlurSlider = null;
+            _motionBlurClampSlider = null;
+            _motionBlurQualityDropdown = null;
+            _motionBlurModeDropdown = null;
             _focusModeDropdown = null;
             _followTargetDropdown = null;
             _followTargetIds.Clear();
@@ -884,6 +963,47 @@ namespace Basis.BasisUI.HandHeldCamera
             _lensDistortionSlider.SetSliderSettings(PanelSlider.SliderSettings.Advanced(
                 BasisLocalization.Get("camera.lensDistortion"), -100f, 100f, false, 0, ValueDisplayMode.Raw));
             _lensDistortionSlider.OnValueChanged = v => _activeCamera?.HandHeld.ChangeLensDistortion(v / 100f);
+
+            _motionBlurSlider = PanelSlider.CreateNew(content);
+            _motionBlurSlider.SetSliderSettings(PanelSlider.SliderSettings.Percentage(BasisLocalization.Get("camera.motionBlur")));
+            _motionBlurSlider.Descriptor.SetDescription(BasisLocalization.Get("camera.motionBlur.description"));
+            _motionBlurSlider.OnValueChanged = v =>
+            {
+                _activeCamera?.HandHeld.ChangeMotionBlur(v / 100f);
+                RefreshMotionBlurVisibility();
+            };
+
+            // The shape controls only mean anything once there is blur to shape, so they follow the
+            // strength the way the depth of field controls follow its mode.
+            _motionBlurClampSlider = PanelSlider.CreateNew(content);
+            _motionBlurClampSlider.SetSliderSettings(PanelSlider.SliderSettings.Advanced(
+                BasisLocalization.Get("camera.motionBlurClamp"),
+                BasisHandHeldCameraUI.MinMotionBlurClamp * 100f, BasisHandHeldCameraUI.MaxMotionBlurClamp * 100f,
+                false, 1, ValueDisplayMode.Percentage));
+            _motionBlurClampSlider.Descriptor.SetDescription(BasisLocalization.Get("camera.motionBlurClamp.description"));
+            _motionBlurClampSlider.OnValueChanged = v => _activeCamera?.HandHeld.ChangeMotionBlurClamp(v / 100f);
+
+            _motionBlurQualityDropdown = PanelDropdown.CreateNewEntry(content);
+            _motionBlurQualityDropdown.Descriptor.SetTitle(BasisLocalization.Get("camera.motionBlurQuality"));
+            _motionBlurQualityDropdown.Descriptor.SetDescription(BasisLocalization.Get("camera.motionBlurQuality.description"));
+            _motionBlurQualityDropdown.AssignLocalizedEntries(
+                new List<string>(MotionBlurQualityLabels), new List<string>(MotionBlurQualityKeys));
+            _motionBlurQualityDropdown.OnValueChanged = _ =>
+            {
+                if (_activeCamera == null || _motionBlurQualityDropdown == null) return;
+                _activeCamera.HandHeld.SetMotionBlurQuality(_motionBlurQualityDropdown.Index);
+            };
+
+            _motionBlurModeDropdown = PanelDropdown.CreateNewEntry(content);
+            _motionBlurModeDropdown.Descriptor.SetTitle(BasisLocalization.Get("camera.motionBlurMode"));
+            _motionBlurModeDropdown.Descriptor.SetDescription(BasisLocalization.Get("camera.motionBlurMode.description"));
+            _motionBlurModeDropdown.AssignLocalizedEntries(
+                new List<string>(MotionBlurModeLabels), new List<string>(MotionBlurModeKeys));
+            _motionBlurModeDropdown.OnValueChanged = _ =>
+            {
+                if (_activeCamera == null || _motionBlurModeDropdown == null) return;
+                _activeCamera.HandHeld.SetMotionBlurMode(_motionBlurModeDropdown.Index);
+            };
 
 #if Basis_VOLUMETRIC_SUPPORTED
             _fogSlider = PanelSlider.CreateNew(content);
@@ -1255,8 +1375,9 @@ namespace Basis.BasisUI.HandHeldCamera
         /// <summary>
         /// One toggle per named, user-togglable layer, controlling whether the capture camera
         /// draws it. Built once from the project's layers; the camera refuses the ones it
-        /// manages itself (OverlayUI, the prop HUD), so those never appear here. The UI layer
-        /// (players' nameplates) is exposed here as its own toggle.
+        /// manages itself (OverlayUI, its own world markers), so those never appear here. The
+        /// UI layer (players' nameplates) and HandHeldCameraUI (the prop's HUD) are exposed
+        /// here as their own toggles.
         /// </summary>
         private void BuildLayersGroup(RectTransform parent)
         {
@@ -1509,6 +1630,7 @@ namespace Basis.BasisUI.HandHeldCamera
                 if (button != null) button.gameObject.SetActive(active);
             }
             if (_previewGroup != null) _previewGroup.SetActive(active);
+            if (_modeDropdown != null) _modeDropdown.gameObject.SetActive(active);
             // The pages have nothing to drive without a camera, so the navigation goes with them.
             if (_tabGroup != null && _tabGroup.TabButtonParent != null)
             {
@@ -1531,11 +1653,6 @@ namespace Basis.BasisUI.HandHeldCamera
             SetSectionActive(_performanceSection, _performanceGroup, active);
             SetSectionActive(_gizmoSection, _gizmoGroup, active);
             if (_resetPageButton != null) _resetPageButton.gameObject.SetActive(active);
-            for (int Index = 0; Index < _searches.Count; Index++)
-            {
-                BasisPanelSearch search = _searches[Index];
-                if (search != null) search.Field.gameObject.SetActive(active);
-            }
 
             if (active) RefreshSearch();
             ForceLayoutRebuild(null);
@@ -1554,6 +1671,12 @@ namespace Basis.BasisUI.HandHeldCamera
             _lastShotRosterHash = -1;
             _lastWaypointCount = -1;
             _lastCinematic = null;
+
+            // Cameras hold their modes independently, so switching between two of them has to
+            // repaint rather than trust the cache from the one that was showing.
+            _activeCamera.RefreshCameraMode();
+            RefreshModeVisuals(force: true);
+
             SeedCinematicCameraControls();
             RefreshShotList();
             RefreshWaypointList();
@@ -1610,6 +1733,16 @@ namespace Basis.BasisUI.HandHeldCamera
             }
             if (metaData.lensDistortion != null)
                 _lensDistortionSlider?.SetValueWithoutNotify(metaData.lensDistortion.intensity.value * 100f);
+            if (metaData.motionBlur != null)
+            {
+                _motionBlurSlider?.SetValueWithoutNotify(metaData.motionBlur.intensity.value * 100f);
+                _motionBlurClampSlider?.SetValueWithoutNotify(metaData.motionBlur.clamp.value * 100f);
+                int quality = Mathf.Clamp(_activeCamera.HandHeld.MotionBlurQuality, 0, MotionBlurQualityLabels.Length - 1);
+                _motionBlurQualityDropdown?.SetValueWithoutNotify(MotionBlurQualityLabels[quality]);
+                int blurMode = Mathf.Clamp(_activeCamera.HandHeld.MotionBlurMode, 0, MotionBlurModeLabels.Length - 1);
+                _motionBlurModeDropdown?.SetValueWithoutNotify(MotionBlurModeLabels[blurMode]);
+            }
+            RefreshMotionBlurVisibility();
 
             if (_msaaDropdown != null)
             {
@@ -1869,6 +2002,7 @@ namespace Basis.BasisUI.HandHeldCamera
             SyncToggle(_autoFollowToggle, _activeCamera.IsAutoFollowing, ref _lastAutoFollow);
             SyncSharedControls();
             RefreshFollowTargets();
+            TickModeState();
             TickCinematicSections();
             RefreshTimerLabel();
             RefreshHiddenState();
@@ -2000,6 +2134,25 @@ namespace Basis.BasisUI.HandHeldCamera
             _dofBladeCountSlider?.gameObject.SetActive(bokeh);
             RefreshSearch();
             ForceLayoutRebuild(_dofGroup);
+        }
+
+        /// <summary>
+        /// The clamp, quality and mode only describe blur that is already happening — at zero
+        /// strength URP does not run the pass at all, so leaving them on screen offers three
+        /// controls that visibly do nothing.
+        /// </summary>
+        private void RefreshMotionBlurVisibility()
+        {
+            if (_activeCamera == null) return;
+
+            bool blurring = _activeCamera.MetaData.motionBlur != null
+                && _activeCamera.MetaData.motionBlur.intensity.value > 0f;
+
+            _motionBlurClampSlider?.gameObject.SetActive(blurring);
+            _motionBlurQualityDropdown?.gameObject.SetActive(blurring);
+            _motionBlurModeDropdown?.gameObject.SetActive(blurring);
+            RefreshSearch();
+            ForceLayoutRebuild(_effectsGroup);
         }
 
         // PanelSlider.ApplyValue restarts a 0.15s fill-colour tween on every call, and the tween

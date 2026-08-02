@@ -24,6 +24,34 @@ namespace Basis.Scripts.Drivers
         private bool[] _hasViseme;
         private SkinnedMeshRenderer _meshRenderer;
 
+        // Response shaping baked from BasisAvatar.FaceVisemeProfiles / FaceVisemeDrive.
+        // _identityMapping short-circuits every avatar that authored nothing, which is
+        // almost all of them, back onto the original probability * 100 write loop.
+        private BakedViseme[] _baked;
+        private float[] _target;
+        private float[] _current;
+        private bool _identityMapping = true;
+        private BasisVisemeDriveMode _mode;
+        private float _winnerMargin;
+        private float _winnerHoldSeconds;
+        private float _silenceFloor;
+        private bool _silIsRest;
+        private int _winner = -1;
+        private float _winnerHeldSeconds;
+
+        private struct BakedViseme
+        {
+            public float Gain;
+            public float Threshold;
+            public float ThresholdSpanInverse;
+            public float OutMin;
+            public float OutMax;
+            public float OutSpan;
+            public float AttackRate;
+            public float ReleaseRate;
+            public bool Binary;
+        }
+
         // Audio buffering for thread-safe audio thread -> main thread transfer
         private float[] _audioBufferA;
         private float[] _audioBufferB;
@@ -94,7 +122,15 @@ namespace Basis.Scripts.Drivers
         public float[] DebugVisemeWeights => _cachedVisemeWeights;
         // Not only debug: the HVR comms viseme bridge reads this every frame. The array is
         // allocated once and only ever mutated in place, so callers may cache the reference.
+        // These are the weights on the mesh (0..100), so on an avatar that authored a response
+        // profile they are post-shaping. Use RawVisemeWeights for the model's own output.
         public float[] LastApplied => _lastApplied;
+
+        /// <summary>
+        /// Model output per viseme (0..1), before any avatar response shaping. Allocated once
+        /// and mutated in place, so the reference may be cached.
+        /// </summary>
+        public float[] RawVisemeWeights => _cachedVisemeWeights;
         public bool DebugTaskRunning => _batchTask != null && !_batchTask.IsCompleted;
         public static int DebugPendingCount => _pendingInference.Count;
         public static bool DebugBatchRunning => _batchTask != null && !_batchTask.IsCompleted;
@@ -122,6 +158,33 @@ namespace Basis.Scripts.Drivers
                 }
             }
 
+            // FaceVisemeMovement is authored against the mesh the creator had in the SDK. A mesh
+            // that arrives with fewer shapes than that — a stripped LOD, a failed import, a
+            // remapped generic rebuild — leaves indices pointing past the end, so drop them here
+            // rather than letting every frame throw. Count 0 is not judged: the shapes may still
+            // be landing, and the per-frame guard covers it until they do.
+            int mappedCeiling = LiveBlendShapeCount();
+            if (mappedCeiling > 0)
+            {
+                int dropped = 0;
+                for (int i = 0; i < VisemeCount; i++)
+                {
+                    if (!_hasViseme[i]) continue;
+
+                    int bsIndex = _visemeToBlendShape[i];
+                    if (bsIndex >= 0 && bsIndex < mappedCeiling) continue;
+
+                    _visemeToBlendShape[i] = -1;
+                    _hasViseme[i] = false;
+                    dropped++;
+                }
+
+                if (dropped > 0)
+                {
+                    Debug.LogWarning($"[OpenLipSync] {dropped} viseme(s) on '{avatar.name}' map past the face mesh's {mappedCeiling} blendshapes and were disabled.");
+                }
+            }
+
             _audioBufferA = new float[AudioBufferSize];
             _audioBufferB = new float[AudioBufferSize];
             _activeBuffer = 0;
@@ -132,9 +195,149 @@ namespace Basis.Scripts.Drivers
             Array.Clear(_cachedVisemeWeights, 0, _cachedVisemeWeights.Length);
             Array.Clear(_lastApplied, 0, _lastApplied.Length);
 
-            BasisOpenLipSyncDriver.SendSignal(_contextHandle, Signals.VisemeSmoothing, 70);
+            int smoothing = BakeProfiles(avatar);
+            BasisOpenLipSyncDriver.SendSignal(_contextHandle, Signals.VisemeSmoothing, smoothing);
 
             _initialized = true;
+        }
+
+        /// <summary>
+        /// Flattens the avatar's authored profiles into a sanitised per-viseme table so the
+        /// per-frame path never has to validate creator input. Returns the backend smoothing
+        /// the avatar asks for. Sets <see cref="_identityMapping"/> when nothing was authored,
+        /// which keeps untouched avatars on the original write loop.
+        /// </summary>
+        private int BakeProfiles(BasisAvatar avatar)
+        {
+            BasisVisemeDriveConfig config = avatar.FaceVisemeDrive;
+            if (config == null || config.IsUnset)
+            {
+                // An avatar built before these fields existed reaches us as null or as an
+                // all-zero instance, and zero is not neutral here: BackendSmoothing 0 strips the
+                // temporal smoothing the backend used to get unconditionally, leaving the mouth
+                // sampling a 100 Hz signal at frame rate. Anything that authored nothing must
+                // come out of this exactly as it did before response shaping existed.
+                config = new BasisVisemeDriveConfig();
+            }
+
+            BasisVisemeProfile[] authored = avatar.FaceVisemeProfiles;
+            if (IsUnsetTable(authored))
+            {
+                // Allocated but never filled in. Baking it would pin every shape to rest and
+                // mute the avatar outright, so fall back to the pass-through defaults.
+                authored = null;
+            }
+
+            _mode = config.Mode;
+            _winnerMargin = Math.Max(0f, config.WinnerMargin);
+            _winnerHoldSeconds = Math.Max(0f, config.WinnerHoldSeconds);
+            _silenceFloor = Math.Clamp(config.SilenceFloor, 0f, 1f);
+            _silIsRest = config.SilIsRest;
+            _winner = -1;
+            _winnerHeldSeconds = 0f;
+
+            bool identity = _mode == BasisVisemeDriveMode.Continuous;
+            if (identity && authored != null)
+            {
+                int authoredCount = Math.Min(authored.Length, VisemeCount);
+                for (int i = 0; i < authoredCount; i++)
+                {
+                    if (!authored[i].IsDefault)
+                    {
+                        identity = false;
+                        break;
+                    }
+                }
+            }
+
+            _identityMapping = identity;
+            if (identity)
+            {
+                _baked = null;
+                _target = null;
+                _current = null;
+                return ResolveBackendSmoothing(config);
+            }
+
+            if (_baked == null || _baked.Length != VisemeCount)
+            {
+                _baked = new BakedViseme[VisemeCount];
+                _target = new float[VisemeCount];
+                _current = new float[VisemeCount];
+            }
+            Array.Clear(_target, 0, _target.Length);
+            Array.Clear(_current, 0, _current.Length);
+
+            for (int i = 0; i < VisemeCount; i++)
+            {
+                BasisVisemeProfile profile = authored != null && i < authored.Length
+                    ? authored[i]
+                    : BasisVisemeProfile.Default;
+
+                if (profile.IsUnset)
+                {
+                    // An entirely-blank slot in an otherwise authored table. Only the blank ones
+                    // are rebuilt: a creator switching a viseme off zeroes its gain or collapses
+                    // its range, and rebuilding THAT would drive the shape they silenced.
+                    profile = BasisVisemeProfile.Default;
+                }
+
+                float threshold = Math.Clamp(profile.Threshold, 0f, 0.99f);
+                float outMin = Math.Clamp(profile.OutMin, 0f, 100f);
+                float outMax = Math.Clamp(profile.OutMax, 0f, 100f);
+                float attack = Math.Max(0f, profile.AttackSeconds);
+                float release = Math.Max(0f, profile.ReleaseSeconds);
+
+                _baked[i] = new BakedViseme
+                {
+                    Gain = Math.Max(0f, profile.Gain),
+                    Threshold = threshold,
+                    ThresholdSpanInverse = 1f / (1f - threshold),
+                    OutMin = outMin,
+                    OutMax = outMax,
+                    OutSpan = outMax - outMin,
+                    AttackRate = attack > 0f ? 100f / attack : 0f,
+                    ReleaseRate = release > 0f ? 100f / release : 0f,
+                    Binary = profile.Binary,
+                };
+            }
+
+            return ResolveBackendSmoothing(config);
+        }
+
+        /// <summary>
+        /// True when a table exists but every entry in it is blank — an allocation nobody ever
+        /// filled in, which is the one case the zeroed struct cannot otherwise be told apart from
+        /// a creator deliberately silencing every viseme.
+        /// </summary>
+        private static bool IsUnsetTable(BasisVisemeProfile[] profiles)
+        {
+            if (profiles == null || profiles.Length == 0)
+            {
+                return false;
+            }
+
+            for (int i = 0; i < profiles.Length; i++)
+            {
+                if (!profiles[i].IsUnset)
+                {
+                    return false;
+                }
+            }
+
+            return true;
+        }
+
+        private int ResolveBackendSmoothing(BasisVisemeDriveConfig config)
+        {
+            int smoothing = config.BackendSmoothing;
+            if (smoothing < 0)
+            {
+                smoothing = _mode == BasisVisemeDriveMode.WinnerTakeAll
+                    ? BasisVisemeDriveConfig.WinnerTakeAllBackendSmoothing
+                    : BasisVisemeDriveConfig.DefaultBackendSmoothing;
+            }
+            return Math.Clamp(smoothing, 0, 100);
         }
 
         /// <summary>
@@ -303,7 +506,7 @@ namespace Basis.Scripts.Drivers
         /// Called on the main thread. If background inference completed, picks up new
         /// viseme weights. Applies cached weights to blendshapes. Never stalls.
         /// </summary>
-        public void Apply()
+        public void Apply(float deltaTime)
         {
             if (!_initialized || _disposed || _meshRenderer == null || !_faceVisible) return;
 
@@ -315,12 +518,41 @@ namespace Basis.Scripts.Drivers
                 Array.Copy(_backFrame.Visemes, _cachedVisemeWeights, visemeCount);
             }
 
+            if (_identityMapping)
+            {
+                ApplyDirect();
+                return;
+            }
+
+            if (_mode == BasisVisemeDriveMode.WinnerTakeAll)
+            {
+                ResolveWinnerTakeAll(deltaTime);
+            }
+            else
+            {
+                ResolveContinuous();
+            }
+
+            ApplyShaped(deltaTime);
+        }
+
+        /// <summary>
+        /// Untouched-avatar path: probability straight to weight, with the same change filter
+        /// that has always guarded the skinned mesh from redundant dirtying.
+        /// </summary>
+        private void ApplyDirect()
+        {
+            int blendShapeCount = LiveBlendShapeCount();
+            if (blendShapeCount == 0) return;
+
             // Apply cached weights (new or stale from last frame - no stall)
             for (int i = 0; i < VisemeCount; i++)
             {
                 if (!_hasViseme[i]) continue;
 
                 int bsIndex = _visemeToBlendShape[i];
+                if (bsIndex < 0 || bsIndex >= blendShapeCount) continue;
+
                 float weight = _cachedVisemeWeights[i] * 100f;
                 weight = Math.Clamp(weight, 0f, 100f);
 
@@ -335,6 +567,146 @@ namespace Basis.Scripts.Drivers
             }
         }
 
+        /// <summary>
+        /// Blendshape count of the mesh as it stands this frame, 0 when there is nothing writable.
+        /// The mapping is captured at Initialize but the mesh underneath it is not fixed: it drops
+        /// to 0 while a SkinnedMeshRenderer outlives its sharedMesh during an avatar swap, and a
+        /// generic import can hand over a renderer whose shapes are still being rebuilt. Writing a
+        /// stale index into either throws per frame, which the exception notifier then amplifies.
+        /// </summary>
+        private int LiveBlendShapeCount()
+        {
+            if (_meshRenderer == null) return 0;
+
+            Mesh sharedMesh = _meshRenderer.sharedMesh;
+            return sharedMesh == null ? 0 : sharedMesh.blendShapeCount;
+        }
+
+        private void ResolveContinuous()
+        {
+            for (int i = 0; i < VisemeCount; i++)
+            {
+                if (!_hasViseme[i]) continue;
+
+                ref BakedViseme baked = ref _baked[i];
+                float value = _cachedVisemeWeights[i] * baked.Gain;
+
+                if (value <= baked.Threshold)
+                {
+                    _target[i] = baked.OutMin;
+                    continue;
+                }
+                if (baked.Binary)
+                {
+                    _target[i] = baked.OutMax;
+                    continue;
+                }
+
+                float normalized = (value - baked.Threshold) * baked.ThresholdSpanInverse;
+                if (normalized > 1f) normalized = 1f;
+                _target[i] = baked.OutMin + baked.OutSpan * normalized;
+            }
+        }
+
+        /// <summary>
+        /// Picks the single strongest viseme and rests everything else. A challenger has to
+        /// clear both the dwell time and the margin before it takes over, because the model
+        /// emits at a 100 Hz hop and a raw argmax flips on every near-tie — invisible when
+        /// shapes blend, but a visible strobe when only one shape is ever shown.
+        /// </summary>
+        private void ResolveWinnerTakeAll(float deltaTime)
+        {
+            int best = -1;
+            float bestValue = 0f;
+
+            for (int i = 0; i < VisemeCount; i++)
+            {
+                if (!_hasViseme[i]) continue;
+
+                ref BakedViseme baked = ref _baked[i];
+                float value = _cachedVisemeWeights[i] * baked.Gain;
+                if (value <= baked.Threshold) continue;
+
+                if (value > bestValue)
+                {
+                    bestValue = value;
+                    best = i;
+                }
+            }
+
+            _winnerHeldSeconds += deltaTime;
+
+            if (best != _winner)
+            {
+                float holderValue = _winner >= 0 && _hasViseme[_winner]
+                    ? _cachedVisemeWeights[_winner] * _baked[_winner].Gain
+                    : 0f;
+
+                if (_winner < 0 || (_winnerHeldSeconds >= _winnerHoldSeconds && bestValue >= holderValue + _winnerMargin))
+                {
+                    _winner = best;
+                    _winnerHeldSeconds = 0f;
+                }
+            }
+
+            int active = _winner;
+            if (active < 0 || bestValue < _silenceFloor || (_silIsRest && active == BasisVisemeDriveConfig.SilVisemeIndex))
+            {
+                active = -1;
+            }
+
+            for (int i = 0; i < VisemeCount; i++)
+            {
+                if (!_hasViseme[i]) continue;
+                _target[i] = i == active ? _baked[i].OutMax : _baked[i].OutMin;
+            }
+        }
+
+        /// <summary>
+        /// Slews toward the resolved targets and writes what changed. The continuous value is
+        /// tracked apart from the last written weight so a slow ramp still advances even while
+        /// each individual step is below the write threshold.
+        /// </summary>
+        private void ApplyShaped(float deltaTime)
+        {
+            int blendShapeCount = LiveBlendShapeCount();
+            if (blendShapeCount == 0) return;
+
+            for (int i = 0; i < VisemeCount; i++)
+            {
+                if (!_hasViseme[i]) continue;
+
+                int bsIndex = _visemeToBlendShape[i];
+                if (bsIndex < 0 || bsIndex >= blendShapeCount) continue;
+
+                float value = _current[i];
+                float target = _target[i];
+
+                if (value != target)
+                {
+                    ref BakedViseme baked = ref _baked[i];
+                    float rate = target > value ? baked.AttackRate : baked.ReleaseRate;
+                    if (rate > 0f)
+                    {
+                        float step = rate * deltaTime;
+                        float delta = target - value;
+                        if (delta > step) target = value + step;
+                        else if (delta < -step) target = value - step;
+                    }
+                    _current[i] = target;
+                }
+
+                float diff = target - _lastApplied[i];
+                bool converged = target == _target[i];
+
+                if (diff * diff > BlendShapeWriteEps * BlendShapeWriteEps || (converged && diff != 0f))
+                {
+                    _meshRenderer.SetBlendShapeWeight(bsIndex, target);
+                    _lastApplied[i] = target;
+                }
+            }
+        }
+
         public void SetFaceVisible(bool visible)
         {
             _faceVisible = visible;
@@ -342,6 +714,14 @@ namespace Basis.Scripts.Drivers
 
         public void ZeroVisemes()
         {
+            _winner = -1;
+            _winnerHeldSeconds = 0f;
+            if (_target != null)
+            {
+                Array.Clear(_target, 0, _target.Length);
+                Array.Clear(_current, 0, _current.Length);
+            }
+
             if (_meshRenderer == null || _hasViseme == null || _visemeToBlendShape == null) return;
 
             // During teardown the SkinnedMeshRenderer can outlive its sharedMesh, leaving

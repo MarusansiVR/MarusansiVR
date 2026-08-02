@@ -247,6 +247,12 @@ namespace Basis.BasisUI
             _tabKeyToIndex.Clear();
             ResetSearch(tabGroup);
 
+            // Search lives on the header, not on every page. The popup outlives nothing: switching to
+            // another provider tears this panel down, and a palette still listing its settings would
+            // navigate into a menu that is no longer there.
+            BasisPanelMoveHandle.SetPanelSearch(panel, Title, CollectSearchResults);
+            panel.OnInstanceReleased += BasisPanelSearchPopup.Close;
+
             // First tab is eager (shown immediately on open)
             const string generalKey = "settings.tab.general";
             _tabKeyToIndex[generalKey] = 0;
@@ -263,7 +269,7 @@ namespace Basis.BasisUI
             tabGroup.AddTab(BasisLocalization.Get(generalKey), () =>
             {
                 _lastSelectedTabKey = generalKey;
-                OnTabShown(generalKey);
+                BindPageReset(generalKey);
             }, generalPage);
             PanelScrollMemory.Attach(generalPage.Descriptor.ContentParent, generalKey);
             AttachTabSearch(generalKey, 0, generalPage);
@@ -376,7 +382,7 @@ namespace Basis.BasisUI
             {
                 _lastSelectedTabKey = tabKey;
                 RealizeTab(tabGroup, tab, forSearch: false);
-                OnTabShown(tabKey);
+                BindPageReset(tabKey);
             }, placeholder);
         }
 
@@ -420,40 +426,59 @@ namespace Basis.BasisUI
 
 
         // ------------------
-        // RESET BUTTON HELPERS (ONE PER PAGE)
+        // RESET HELPERS (ONE PER PAGE)
         // ------------------
+
         /// <summary>
-        /// Adds a "Reset &lt;page name&gt;" button that, on confirm, runs
-        /// <paramref name="resetAction"/>, closes the menu, and reopens Settings
-        /// on the same tab. <paramref name="tabKey"/> is the localization key
-        /// registered via <see cref="AddLazyTab"/>; it's used both to resolve
-        /// the page label and to navigate back after the reset.
+        /// What "reset this page" means, per tab. Populated as each tab builds and read back when
+        /// that tab is shown, so the panel's Reset button always offers the page in front of the
+        /// user rather than whichever one happened to be built last.
         /// </summary>
-        public static void AddResetPageButton(RectTransform parent, string tabKey, Action resetAction)
+        private static readonly Dictionary<string, Action> _pageResets = new();
+
+        /// <summary>
+        /// Registers this page's "back to defaults" action. Running it also closes the menu and
+        /// reopens Settings on the same tab, which is how the page picks up the new values.
+        /// <para>
+        /// There is no longer a "Reset &lt;page&gt;" button in the page itself — the panel header's
+        /// Reset offers it, alongside putting the panel back where it started, so one control covers
+        /// both meanings of "reset" instead of two that are easy to confuse.
+        /// </para>
+        /// <paramref name="tabKey"/> is the localization key registered via <see cref="AddLazyTab"/>;
+        /// it resolves the page label and navigates back after the reset.
+        /// </summary>
+        public static void RegisterPageReset(string tabKey, Action resetAction)
         {
-            string pageName = BasisLocalization.Get(tabKey);
-
-            PanelButton reset = PanelButton.CreateNew(parent);
-            reset.Descriptor.SetTitle(BasisLocalization.Get("ui.resetPage.title", pageName));
-            reset.OnClicked += () =>
+            _pageResets[tabKey] = () =>
             {
-                BasisMainMenu.Instance.OpenDialogue(
-                    BasisLocalization.Get("ui.resetPage.title", pageName),
-                    BasisLocalization.Get("ui.resetPage.confirm", pageName),
-                    BasisLocalization.Get("ui.reset"),
-                    BasisLocalization.Get("ui.cancel"),
-                    value =>
-                    {
-                        if (!value)
-                        {
-                            return;
-                        }
-
-                        resetAction?.Invoke();
-                        BasisMainMenu.Close();
-                        OpenToTab(tabKey);
-                    });
+                resetAction?.Invoke();
+                BasisMainMenu.Close();
+                OpenToTab(tabKey);
             };
+        }
+
+        /// <summary>
+        /// Points the panel header's Reset at the page now on show. Runs on every tab selection,
+        /// after the tab has been realized, so a lazily built page has already registered itself.
+        /// </summary>
+        private static void BindPageReset(string tabKey)
+        {
+            if (BasisMainMenu.Instance == null)
+            {
+                return;
+            }
+
+            // Assign unconditionally, including the pages that have nothing to reset. Skipping those
+            // would leave the last page's action in place and offer "Reset Graphics" to someone
+            // looking at My Avatar.
+            _pageResets.TryGetValue(tabKey, out Action reset);
+            string pageName = reset == null ? null : BasisLocalization.Get(tabKey);
+
+            BasisPanelMoveHandle.SetPanelReset(
+                BasisMainMenu.Instance.ActiveMenu,
+                reset == null ? null : BasisLocalization.Get("ui.resetPage.title", pageName),
+                reset == null ? null : BasisLocalization.Get("menu.panel.reset.choose", pageName),
+                reset);
         }
 
         // ------------------
@@ -499,6 +524,11 @@ namespace Basis.BasisUI
                 toggleDisableVRAutoHold.AssignBinding(BasisSettingsDefaults.DisableVRAutoHold);
                 toggleDisableVRAutoHold.Descriptor.SetTitle(BasisLocalization.Get("settings.general.disableVRAutoHold"));
                 toggleDisableVRAutoHold.Descriptor.SetTooltip(BasisLocalization.Get("settings.general.disableVRAutoHold.tooltip"));
+
+                PanelToggle toggleJiggleGrabInteractions = PanelToggle.CreateNewEntry(container);
+                toggleJiggleGrabInteractions.AssignBinding(BasisSettingsDefaults.JiggleGrabInteractions);
+                toggleJiggleGrabInteractions.Descriptor.SetTitle(BasisLocalization.Get("settings.general.jiggleGrabInteractions"));
+                toggleJiggleGrabInteractions.Descriptor.SetTooltip(BasisLocalization.Get("settings.general.jiggleGrabInteractions.tooltip"));
 
                 PanelToggle toggleUIHaptics = PanelToggle.CreateNewEntry(container);
                 toggleUIHaptics.AssignBinding(BasisSettingsDefaults.UIHaptics);
@@ -619,7 +649,7 @@ namespace Basis.BasisUI
             }, false, _ => descriptor.ForceRebuild());
 
             // One reset button for this whole page
-            AddResetPageButton(container, "settings.tab.general", ResetGeneralDefaults);
+            RegisterPageReset("settings.tab.general", ResetGeneralDefaults);
             descriptor.ForceRebuild();
             return tab;
         }
@@ -789,6 +819,7 @@ namespace Basis.BasisUI
             BasisSettingsDefaults.DisableSeats.ResetToDefault();
             BasisSettingsDefaults.DisablePropPickup.ResetToDefault();
             BasisSettingsDefaults.DisableVRAutoHold.ResetToDefault();
+            BasisSettingsDefaults.JiggleGrabInteractions.ResetToDefault();
             BasisSettingsDefaults.UIHaptics.ResetToDefault();
             BasisSettingsDefaults.HideRemoteCameraPucks.ResetToDefault();
             BasisSettingsDefaults.DesktopReticle.ResetToDefault();
@@ -993,7 +1024,7 @@ namespace Basis.BasisUI
             SettingsProviderRemoteAudio.BuildRemoteAudioUI(container);
 
             // One reset button for this whole page
-            AddResetPageButton(container, "settings.tab.audio", ResetAudioDefaults);
+            RegisterPageReset("settings.tab.audio", ResetAudioDefaults);
             descriptor.ForceRebuild();
             return tab;
         }
@@ -1403,7 +1434,7 @@ namespace Basis.BasisUI
             PanelSectionToggleHelpers.FinalizeFlatSectionFromIndex(toggleAdvanced, container, advancedStart, false,
                 _ => descriptor.ForceRebuild());
 
-            AddResetPageButton(container, "settings.tab.microphone", ResetMicrophoneDefaults);
+            RegisterPageReset("settings.tab.microphone", ResetMicrophoneDefaults);
 #endif
             descriptor.ForceRebuild();
             return tab;
@@ -2001,7 +2032,7 @@ namespace Basis.BasisUI
             SettingsProviderPerformanceLimits.BuildPerformanceLimitsContent(container, true);
 
             // One reset button for this whole page
-            AddResetPageButton(container, "settings.tab.graphics", ResetGraphicsDefaults);
+            RegisterPageReset("settings.tab.graphics", ResetGraphicsDefaults);
 
             descriptor.ForceRebuild();
             return tab;
@@ -2357,7 +2388,7 @@ namespace Basis.BasisUI
 
             BuildAppearanceContent(container, descriptor);
 
-            AddResetPageButton(container, "settings.tab.chat", ResetChatDefaults);
+            RegisterPageReset("settings.tab.chat", ResetChatDefaults);
 
             descriptor.ForceRebuild();
             return tab;
@@ -2636,6 +2667,11 @@ namespace Basis.BasisUI
             toggleSeatTargets.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.seatTargets"));
             toggleSeatTargets.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.seatTargets.tooltip"));
             toggleSeatTargets.AssignBinding(BasisSettingsDefaults.GizmoSeatTargets);
+
+            PanelToggle toggleJiggleGrabGizmo = PanelToggle.CreateNewEntry(container);
+            toggleJiggleGrabGizmo.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.jiggleGrab"));
+            toggleJiggleGrabGizmo.Descriptor.SetTooltip(BasisLocalization.Get("settings.developer.jiggleGrab.tooltip"));
+            toggleJiggleGrabGizmo.AssignBinding(BasisSettingsDefaults.GizmoJiggleGrab);
 
             PanelToggle toggleAudioRanges = PanelToggle.CreateNewEntry(container);
             toggleAudioRanges.Descriptor.SetTitle(BasisLocalization.Get("settings.developer.audioRanges"));
@@ -3144,7 +3180,7 @@ namespace Basis.BasisUI
                 false, _ => descriptor.ForceRebuild());
 
             // One reset button for this whole page
-            AddResetPageButton(container, "settings.tab.developer", ResetDeveloperDefaults);
+            RegisterPageReset("settings.tab.developer", ResetDeveloperDefaults);
 
             descriptor.ForceRebuild();
             return tab;

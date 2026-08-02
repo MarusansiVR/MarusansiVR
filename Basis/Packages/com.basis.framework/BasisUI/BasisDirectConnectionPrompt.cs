@@ -51,6 +51,8 @@ namespace Basis.BasisUI
             };
             BasisMenuPanel panel = BasisMenuPanel.CreateNew(
                 data, BasisMainMenu.Instance.MenuObjectInstance.PanelRoot, BasisMenuPanel.PanelStyles.Page);
+            panel.SetLayer(BasisMenuPanel.PanelLayer.Overlay);
+            BasisPanelMoveHandle.Attach(panel, nameof(BasisDirectConnectionPrompt));
 
             // Vertical scrollable content — same pattern as the player panels.
             PanelTabPage tab = PanelTabPage.CreateVertical(panel.Descriptor.ContentParent);

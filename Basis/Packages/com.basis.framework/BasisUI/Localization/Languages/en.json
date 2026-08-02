@@ -27,6 +27,54 @@
       "value": "Camera"
     },
     {
+      "key": "camera.modePreset",
+      "value": "Mode"
+    },
+    {
+      "key": "camera.modePreset.description",
+      "value": "What this camera is for. Picking a mode sets it up for that job and colours each section below: brightly for settings the mode chose, dimly for ones that do nothing here. Change anything and the mode becomes Custom — nothing is ever locked."
+    },
+    {
+      "key": "camera.modePreset.custom",
+      "value": "Custom"
+    },
+    {
+      "key": "camera.modePreset.custom.description",
+      "value": "Your own setup. Shown whenever the settings no longer match a mode, so it is not something you switch to — it is where you end up once you start tuning. Pick a mode to go back to a known starting point."
+    },
+    {
+      "key": "camera.modePreset.photo",
+      "value": "Photo"
+    },
+    {
+      "key": "camera.modePreset.photo.description",
+      "value": "The ordinary handheld camera, set up exactly as it ships. Stays in your hand, normal lens, no effects added. The follow and cinematic sections do nothing in this mode."
+    },
+    {
+      "key": "camera.modePreset.flyingPuck",
+      "value": "Flying Puck"
+    },
+    {
+      "key": "camera.modePreset.flyingPuck.description",
+      "value": "Streaming. The camera parks in the world and you fly it by hand — levelled, stabilised, wide enough to hold a room, and deep-focus so nothing on screen goes soft."
+    },
+    {
+      "key": "camera.modePreset.followMe",
+      "value": "Follow Me"
+    },
+    {
+      "key": "camera.modePreset.followMe.description",
+      "value": "The camera flies itself and keeps you in frame, staying focused on you as you move. Use the Follow section to place it around you and to point it at someone else instead."
+    },
+    {
+      "key": "camera.modePreset.cinematic",
+      "value": "Cinematic"
+    },
+    {
+      "key": "camera.modePreset.cinematic.description",
+      "value": "The shot rig drives the camera along your dolly, orbit and framing moves. A longer lens, shallower focus and a little motion blur for the filmic look. Follow does nothing here — the rig owns where the camera goes."
+    },
+    {
       "key": "camera.noCamerasOpen",
       "value": "No Cameras Open"
     },
@@ -181,6 +229,58 @@
     {
       "key": "camera.lensDistortion",
       "value": "Lens Distortion"
+    },
+    {
+      "key": "camera.motionBlur",
+      "value": "Motion Blur"
+    },
+    {
+      "key": "camera.motionBlur.description",
+      "value": "Smear the shot along the direction things are moving. Zero switches it off."
+    },
+    {
+      "key": "camera.motionBlurClamp",
+      "value": "Blur Length Limit"
+    },
+    {
+      "key": "camera.motionBlurClamp.description",
+      "value": "How long a streak may get, as a share of the frame. Lower keeps fast pans readable."
+    },
+    {
+      "key": "camera.motionBlurQuality",
+      "value": "Blur Quality"
+    },
+    {
+      "key": "camera.motionBlurQuality.description",
+      "value": "Samples taken along each streak. Higher is smoother and costs more."
+    },
+    {
+      "key": "camera.motionBlurQuality.low",
+      "value": "Low"
+    },
+    {
+      "key": "camera.motionBlurQuality.medium",
+      "value": "Medium"
+    },
+    {
+      "key": "camera.motionBlurQuality.high",
+      "value": "High"
+    },
+    {
+      "key": "camera.motionBlurMode",
+      "value": "Blur Source"
+    },
+    {
+      "key": "camera.motionBlurMode.description",
+      "value": "Camera Only blurs when the camera moves. Camera And Objects also blurs things moving in front of a still camera, and costs more."
+    },
+    {
+      "key": "camera.motionBlurMode.cameraOnly",
+      "value": "Camera Only"
+    },
+    {
+      "key": "camera.motionBlurMode.cameraAndObjects",
+      "value": "Camera And Objects"
     },
     {
       "key": "camera.volumetricFog",
@@ -759,6 +859,10 @@
       "value": "Show the seated-pose solve targets for the back, knees, and feet."
     },
     {
+      "key": "settings.developer.jiggleGrab.tooltip",
+      "value": "Show live jiggle grabs: the held bone, where it is being pulled to, that bone's reach limit, and the pick spheres your hands search when you press grab."
+    },
+    {
       "key": "settings.developer.audioRanges.tooltip",
       "value": "Show your hearing-distance sphere and each speaker's full-volume range."
     },
@@ -1201,6 +1305,14 @@
     {
       "key": "settings.bodyTracking.lordosisExtremeHipsHoriz.title.tooltip",
       "value": "Sideways hip shift allowed during extreme back curves."
+    },
+    {
+      "key": "settings.bodyTracking.lordosisExtremeHipsHorizLookUp.title.tooltip",
+      "value": "Maximum forward hips shift at a full look UP, in meters. In an arch the pelvis leads. Default: 0.025"
+    },
+    {
+      "key": "settings.bodyTracking.lordosisExtremeChestHorizLookUp.title.tooltip",
+      "value": "Maximum forward chest shift at a full look UP, in meters. Kept well under the hips value so the chest does not lead the body. Default: 0.01"
     },
     {
       "key": "settings.bodyTracking.lordosisExtremeChestHoriz.title.tooltip",
@@ -2307,6 +2419,42 @@
       "value": "Main Menu"
     },
     {
+      "key": "menu.panel.move",
+      "value": "Move"
+    },
+    {
+      "key": "menu.panel.move.tooltip",
+      "value": "Hold to drag this panel where you want it. In VR, push the thumbstick of the holding hand forward or back to move it further away or closer."
+    },
+    {
+      "key": "menu.panel.reset",
+      "value": "Reset"
+    },
+    {
+      "key": "menu.panel.reset.tooltip",
+      "value": "Put this panel back where it started, or put this page's settings back to defaults."
+    },
+    {
+      "key": "menu.panel.reset.position",
+      "value": "Reset Position"
+    },
+    {
+      "key": "menu.panel.search",
+      "value": "Search"
+    },
+    {
+      "key": "menu.panel.search.tooltip",
+      "value": "Look through everything on this panel and jump straight to it."
+    },
+    {
+      "key": "menu.panel.search.prompt",
+      "value": "Start typing to find a setting."
+    },
+    {
+      "key": "menu.panel.reset.choose",
+      "value": "Reset all {0} settings to defaults, or just put this panel back where it started?"
+    },
+    {
       "key": "keyboard.title",
       "value": "Virtual Keyboard"
     },
@@ -3235,6 +3383,14 @@
       "value": "Always render this player's avatar, even when distance, the max visible avatar cap, or the view cone filter would normally replace it with the loading avatar. Blocking and the performance filter still apply."
     },
     {
+      "key": "menu.individualPlayer.jiggleGrab",
+      "value": "Allow Jiggle Grabbing"
+    },
+    {
+      "key": "menu.individualPlayer.jiggleGrab.description",
+      "value": "Allow grabbing and pulling jiggle physics between you and this player, in both directions. Turning this off immediately releases any grab they have on you. Blocking a player always prevents grabbing."
+    },
+    {
       "key": "menu.individualPlayer.enableInteractions",
       "value": "Enable Interactions"
     },
@@ -3791,6 +3947,162 @@
       "value": "Bones Count"
     },
     {
+      "key": "library.details",
+      "value": "{0} Statistics"
+    },
+    {
+      "key": "library.details.tooltip",
+      "value": "Open a full breakdown of this item's metadata and components."
+    },
+    {
+      "key": "library.dialog.details.body",
+      "value": "Everything stored about this item."
+    },
+    {
+      "key": "library.dialog.details.noMetadata",
+      "value": "This item carries no bundle metadata."
+    },
+    {
+      "key": "library.dialog.details.section.content",
+      "value": "Content"
+    },
+    {
+      "key": "library.dialog.details.section.metrics",
+      "value": "Metrics"
+    },
+    {
+      "key": "library.dialog.details.section.bounds",
+      "value": "Bounds"
+    },
+    {
+      "key": "library.dialog.details.section.bounds.description",
+      "value": "Size measured when the item was built, in meters."
+    },
+    {
+      "key": "library.dialog.details.section.components",
+      "value": "Components"
+    },
+    {
+      "key": "library.dialog.details.section.components.description",
+      "value": "{0} kinds, {1} in total."
+    },
+    {
+      "key": "library.dialog.details.section.components.none",
+      "value": "This item was built before component metadata existed."
+    },
+    {
+      "key": "library.dialog.details.section.propSpawn",
+      "value": "Spawn Request"
+    },
+    {
+      "key": "library.dialog.details.section.propSpawn.description",
+      "value": "How this prop asks to be placed when spawned."
+    },
+    {
+      "key": "library.dialog.details.section.platform.description",
+      "value": "Bundle section stored for this platform."
+    },
+    {
+      "key": "library.dialog.details.name",
+      "value": "Name"
+    },
+    {
+      "key": "library.dialog.details.description",
+      "value": "Description"
+    },
+    {
+      "key": "library.dialog.details.contentType",
+      "value": "Content Type"
+    },
+    {
+      "key": "library.dialog.details.tags",
+      "value": "Tags"
+    },
+    {
+      "key": "library.dialog.details.contentGroup",
+      "value": "Content Group"
+    },
+    {
+      "key": "library.dialog.details.uniqueVersion",
+      "value": "Unique Version"
+    },
+    {
+      "key": "library.dialog.details.textureMemory",
+      "value": "Texture Memory"
+    },
+    {
+      "key": "library.dialog.details.graphicsPipeline",
+      "value": "Render Pipeline"
+    },
+    {
+      "key": "library.dialog.details.farLod",
+      "value": "Far LOD"
+    },
+    {
+      "key": "library.dialog.details.boundsCenter",
+      "value": "Center"
+    },
+    {
+      "key": "library.dialog.details.boundsSize",
+      "value": "Size"
+    },
+    {
+      "key": "library.dialog.details.boundsExtents",
+      "value": "Extents"
+    },
+    {
+      "key": "library.dialog.details.assetMode",
+      "value": "Asset Mode"
+    },
+    {
+      "key": "library.dialog.details.assetName",
+      "value": "Asset Name"
+    },
+    {
+      "key": "library.dialog.details.size",
+      "value": "Download Size"
+    },
+    {
+      "key": "library.dialog.details.encrypted",
+      "value": "Encrypted"
+    },
+    {
+      "key": "library.dialog.details.crc",
+      "value": "CRC"
+    },
+    {
+      "key": "library.dialog.details.hash",
+      "value": "Hash"
+    },
+    {
+      "key": "library.dialog.details.graphicsAPIs",
+      "value": "Graphics APIs"
+    },
+    {
+      "key": "library.dialog.details.hand",
+      "value": "Hand"
+    },
+    {
+      "key": "library.dialog.details.distance",
+      "value": "Distance"
+    },
+    {
+      "key": "library.dialog.details.scale",
+      "value": "Scale"
+    },
+    {
+      "key": "library.dialog.details.alignToSurface",
+      "value": "Align To Surface"
+    },
+    {
+      "key": "library.dialog.details.faceThePlayer",
+      "value": "Face The Player"
+    },
+    {
+      "key": "library.dialog.details.none",
+      "value": "(none)"
+    },
+    {
       "key": "library.uniqueVersion",
       "value": "Unique Version:"
     },
@@ -3963,6 +4275,18 @@
       "value": "({0} spawned)"
     },
     {
+      "key": "library.stack.versions",
+      "value": "{0} versions"
+    },
+    {
+      "key": "library.stack.latestEntry",
+      "value": "{0} — Latest"
+    },
+    {
+      "key": "library.dialog.pickVersion.body",
+      "value": "This item has multiple uploaded versions. Pick the one you want to use."
+    },
+    {
       "key": "library.select",
       "value": "Select"
     },
@@ -3977,6 +4301,66 @@
     {
       "key": "library.share",
       "value": "Share"
+    },
+    {
+      "key": "library.checkForUpdate",
+      "value": "Check for Update"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.title",
+      "value": "Check {0} for Updates"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.checking",
+      "value": "Asking the host whether this content has changed..."
+    },
+    {
+      "key": "library.dialog.checkForUpdate.upToDate.title",
+      "value": "Already Up To Date"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.upToDate.body",
+      "value": "{0} matches the copy published at its address, so nothing needs downloading."
+    },
+    {
+      "key": "library.dialog.checkForUpdate.baseline.title",
+      "value": "Now Tracking Updates"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.baseline.body",
+      "value": "{0} had no recorded version yet, so this first check had nothing to compare against. The version published right now has been recorded, and future checks will detect changes properly.\n\nIf you updated this content before now, refresh it anyway?"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.available.title",
+      "value": "Update Available"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.available.body",
+      "value": "The content at this address has changed since {0} was downloaded.\n\nRefresh it now? The cached copy will be discarded and downloaded again the next time it loads."
+    },
+    {
+      "key": "library.dialog.checkForUpdate.unsupported.title",
+      "value": "Cannot Detect Changes"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.unsupported.body",
+      "value": "This host does not report when a file was last changed, so updates cannot be detected automatically.\n\nRefresh anyway? This discards the cached copy and downloads it again, even if nothing changed."
+    },
+    {
+      "key": "library.dialog.checkForUpdate.failed.title",
+      "value": "Update Check Failed"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.failed.body",
+      "value": "Could not reach the content at its address.\n\n{0}"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.refreshing.title",
+      "value": "Refreshing Content"
+    },
+    {
+      "key": "library.dialog.checkForUpdate.refreshing.body",
+      "value": "Discarding the cached copy of {0} and fetching the latest version..."
     },
     {
       "key": "library.teleportTo",
@@ -4477,6 +4861,14 @@
     {
       "key": "settings.general.disableVRAutoHold.description",
       "value": "Ignore VR auto-hold on pickups, so you must keep holding the grab button to carry them."
+    },
+    {
+      "key": "settings.general.jiggleGrabInteractions",
+      "value": "Jiggle Grab Interactions"
+    },
+    {
+      "key": "settings.general.jiggleGrabInteractions.tooltip",
+      "value": "Allow grabbing and pulling jiggle physics (hair, tails, and similar) between you and other players. Turning this off means you never grab anyone and nobody's grabs affect you. Per-player permission lives in each player's panel."
     },
     {
       "key": "settings.general.hud.title",
@@ -6623,6 +7015,22 @@
       "value": "Maximum horizontal chest counter-shift at full extreme look, in meters. Default: 0.04"
     },
     {
+      "key": "settings.bodyTracking.lordosisExtremeHipsHorizLookUp.title",
+      "value": "Lordosis Extreme Hips Shift, Look Up (m)"
+    },
+    {
+      "key": "settings.bodyTracking.lordosisExtremeHipsHorizLookUp.description",
+      "value": "Maximum forward hips shift at a full look UP, in meters. In an arch the pelvis leads. Default: 0.025"
+    },
+    {
+      "key": "settings.bodyTracking.lordosisExtremeChestHorizLookUp.title",
+      "value": "Lordosis Extreme Chest Shift, Look Up (m)"
+    },
+    {
+      "key": "settings.bodyTracking.lordosisExtremeChestHorizLookUp.description",
+      "value": "Maximum forward chest shift at a full look UP, in meters. Kept well under the hips value so the chest does not lead the body. Default: 0.01"
+    },
+    {
       "key": "settings.bodyTracking.lordosisExtremeHipsDown.title",
       "value": "Lordosis Extreme Hips Drop (m)"
     },
@@ -7549,6 +7957,10 @@
     {
       "key": "settings.developer.seatTargets",
       "value": "Seat Targets"
+    },
+    {
+      "key": "settings.developer.jiggleGrab",
+      "value": "Jiggle Grab"
     },
     {
       "key": "settings.developer.audioRanges",
@@ -10117,6 +10529,30 @@
     {
       "key": "settings.bodyTracking.neckGazeFollow.title.tooltip",
       "value": "How much the neck turns toward where you are looking."
+    },
+    {
+      "key": "settings.bodyTracking.vspineGazeSwingRemoval.title",
+      "value": "Ignore Gaze Swing For Stance"
+    },
+    {
+      "key": "settings.bodyTracking.vspineGazeSwingRemoval.title.tooltip",
+      "value": "How much of the headset movement caused by simply looking up or down is ignored when deciding where you are standing. Higher keeps the hips under you instead of walking backwards when you look up. 0 restores the old behaviour. Default: 1"
+    },
+    {
+      "key": "settings.bodyTracking.vspineGazeSwingRemoval.description",
+      "value": "How much of the headset movement caused by simply looking up or down is ignored when deciding where you are standing. Higher keeps the hips under you instead of walking backwards when you look up. 0 restores the old behaviour. Default: 1"
+    },
+    {
+      "key": "settings.bodyTracking.neckExtensionDamp.title",
+      "value": "Look-Up Neck Damping"
+    },
+    {
+      "key": "settings.bodyTracking.neckExtensionDamp.title.tooltip",
+      "value": "How much of a look-up the neck is assumed NOT to carry. Higher keeps the chest and hips from drifting forward when you look at the ceiling. 0 restores the old behaviour. Default: 0.65"
+    },
+    {
+      "key": "settings.bodyTracking.neckExtensionDamp.description",
+      "value": "How much of a look-up the neck is assumed NOT to carry. Higher keeps the chest and hips from drifting forward when you look at the ceiling. 0 restores the old behaviour. Default: 0.65"
     },
     {
       "key": "settings.bodyTracking.neckGazeFollowMax.title",

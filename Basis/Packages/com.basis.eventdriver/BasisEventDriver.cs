@@ -571,7 +571,7 @@ namespace Basis.EventDriver
                 }
                 using (Prof.VisemeApply.Auto())
                 {
-                    localplayer.LocalVisemeDriver.Apply();
+                    localplayer.LocalVisemeDriver.Apply(DeltaTime);
                 }
             }
 
@@ -696,7 +696,7 @@ namespace Basis.EventDriver
             ProfileBegin(PROF_REMOTE_AUDIO_APPLY);
             using (Prof.RemoteAudioApply.Auto())
             {
-                BasisRemoteAudioDriver.Apply();
+                BasisRemoteAudioDriver.Apply(DeltaTime);
             }
             ProfileEnd(PROF_REMOTE_AUDIO_APPLY);
 
@@ -849,6 +849,12 @@ namespace Basis.EventDriver
             {
                 BasisFrameSyncRegistry.Simulate();
             }
+            // Jiggle grab targets ride the same window: skeletons posed, nothing dispatched yet,
+            // so the pin targets pushed here are sampled by this frame's simulate.
+            Basis.Scripts.BasisSdk.Interactions.BasisJiggleGrabDriver.FrameTick();
+            // Touch reporting reads the same posed bones. Returns on a count check when no content
+            // has asked for jiggle events, which is the usual case.
+            Basis.Scripts.BasisSdk.Interactions.BasisJiggleInteractionEvents.FrameTick();
             BasisFiniteWatchdog.Checkpoint("PostFrameSync (pre jiggle dispatch)");
             BasisFiniteWatchdog.CheckpointRemote("PostFrameSync (pre jiggle dispatch)");
 

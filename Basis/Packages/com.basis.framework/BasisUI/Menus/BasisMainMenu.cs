@@ -42,6 +42,7 @@ namespace Basis.BasisUI
         public BasisMainMenu()
         {
             HotbarMenu = BasisMenuPanel.CreateNew(BasisMenuPanel.PanelData.Toolbar(MenuTitle), MenuObjectInstance.PanelRoot);
+            HotbarMenu.SetLayer(BasisMenuPanel.PanelLayer.MainMenu);
 
             HorizontalLayout = PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.ScrollViewHorizontal, HotbarMenu.Descriptor.ContentParent);
             if(HorizontalLayout.ContentParent.TryGetComponent(out BasisHorizontalLayout Layout))
@@ -416,10 +417,40 @@ namespace Basis.BasisUI
             Instance.ActiveProvider = provider;
             BasisMenuStateMemory.ActiveProviderTitle = data.Title;
 
+            // Every provider panel gets the move handle, which also restores where the user last
+            // dragged this one to.
+            BasisPanelMoveHandle.Attach(Instance.ActiveMenu, ResolvePanelOffsetKey(data.Title, provider));
+
             // Animate content panel entrance
             UIAnimations.PanelIn(Instance.ActiveMenu);
 
             return Instance.ActiveMenu;
+        }
+
+        /// <summary>
+        /// Stable per-provider key for remembered panel placement. Most providers do not hand
+        /// themselves to <see cref="CreateActiveMenu"/>, so the one whose title built this panel is
+        /// looked up instead — its type name survives a language change, which the localized title
+        /// on <see cref="BasisMenuPanel.PanelData"/> would not.
+        /// </summary>
+        private static string ResolvePanelOffsetKey(string title, BasisMenuActionProvider<BasisMainMenu> provider)
+        {
+            if (provider != null)
+            {
+                return provider.GetType().Name;
+            }
+
+            int count = Providers.Count;
+            for (int Index = 0; Index < count; Index++)
+            {
+                BasisMenuActionProvider<BasisMainMenu> candidate = Providers[Index];
+                if (candidate != null && candidate.Title == title)
+                {
+                    return candidate.GetType().Name;
+                }
+            }
+
+            return title;
         }
 
         public static void CloseActivePanel()

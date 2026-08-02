@@ -17,26 +17,43 @@ namespace Basis.IK
         // Hybrid hips XZ model — replaces the former HipsXZFollowBlend lerp with an anatomy-aware
         // counterbalance + foot-pendulum. See ComputeRealisticHipsXZBurst for details.
 
-        /// <summary>How far the head may get from the support base without the user having stepped, as a
-        /// fraction of their standing head height. Inside it the head is leaning and the support base holds;
-        /// beyond it the user must have stepped, so the base follows.</summary>
+        /// <summary>How far the head can get from the support base without the user having stepped, as a
+        /// fraction of their standing head height. No longer a threshold — it is the SCALE the follow law is
+        /// written in, so "a stance radius behind" means the same thing on every avatar and at every crouch
+        /// depth. See HeadBaselineFollowRateGain.</summary>
         private const float StanceRadiusFrac = 0.12f;
 
         /// <summary>Extra stance radius per metre the head has DESCENDED, so a crouch is not mistaken for a step.
         /// "A lean cannot reach past a stance radius" holds for a standing lean but NOT for a squat: a real one
         /// leans the trunk ~35 deg and carries the head ~0.16 of standing height forward with the feet planted,
-        /// well past the 0.12 radius. The base then concluded "stepped", followed the head at HeadBaselinePullRate,
-        /// and left the hips forward of the player once they stood back up -- permanently, since nothing pulls the
-        /// baseline back. Measured squat kinematics (Kasahara 2024 joint angles through sagittal FK) put the head's
+        /// well past the 0.12 radius, so the base concluded "stepped", chased the head, and left the hips forward
+        /// of the player once they stood back up. Widening the radius under a crouch now softens the follow law
+        /// rather than deferring a switch, but it buys the same thing. Measured squat kinematics (Kasahara 2024 joint angles through sagittal FK) put the head's
         /// forward travel at 0.55-0.70x its vertical drop across the whole depth range, so allowing the larger of
         /// those covers a legitimate crouch at any depth. Zero at standing height, so ordinary stepping is
         /// completely unaffected.</summary>
         private const float CrouchLeanAllowanceFrac = 0.70f;
 
-        /// <summary>Rate (s⁻¹) the support base follows the head once the head is a full stance radius outside
-        /// it. Stiff on purpose: a soft pull lags the head through a step and then creeps into the leftover
-        /// error after it stops, which is the drift this replaces.</summary>
-        private const float HeadBaselinePullRate = 200f;
+        /// <summary>Rate (s⁻¹) the support base follows the head when it is already sitting on it. This is the
+        /// floor of the follow law, and it is what keeps the base from being dragged around by tracker noise
+        /// and head micro-motion: at 2 s⁻¹ a stray centimetre takes about half a second to be adopted, so
+        /// jitter averages out instead of walking the base. Low, but never zero — zero is a dead zone, and a
+        /// dead zone is what stranded the pelvis in the first place.</summary>
+        private const float HeadBaselineFollowRateRest = 2f;
+
+        /// <summary>Extra follow rate (s⁻¹) per stance radius the base has fallen behind the head. THE knob for
+        /// "the hips do not follow enough": raising it tightens the pelvis to the player everywhere at once,
+        /// with no threshold introduced anywhere, because the lag it produces is continuous in the distance
+        /// (it solves L·(rest + gain·L/radius) = v). Measured on the real job at 250: the pelvis trails a
+        /// 1.2 m/s walk by 1.5 cm and is back under the player 178 ms after a step ends, while a 1 cm head
+        /// nudge still only moves it 37% in the first frame — tight, but not welded. 120 gave 2.5 cm and
+        /// 333 ms; 350 buys 1.2 cm and 133 ms and starts to read as a snap. Raise if it feels dragged, lower
+        /// if the body feels stuck to the head.</summary>
+        private const float HeadBaselineFollowRateGain = 250f;
+
+
+
+
 
         /// <summary>How much hips track the head's deviation from baseline. 0 = pure counterbalance
         /// (hips never move from baseline), 1 = legacy "follow head fully". 0.25 keeps a small forward
@@ -111,7 +128,16 @@ namespace Basis.IK
             public float ChestRotationSpeed;
             public float SpineRotationSpeed;
             public float HipsRotationSpeed;
+            /// <summary>Authored T-pose eye-minus-HEAD lever; the arm the Eye->Head lock swings the eye
+            /// around, and therefore the exact displacement that lock attributes to a gaze.</summary>
+            public float3 EyeFromHeadTpose;
+            /// <summary>How much of the gaze-induced eye swing to remove before the stance leash sees it.
+            /// 0 = the old behaviour (the leash reads a nod as a step). See BasisHeadPitchSwingCore.</summary>
+            public float GazeSwingRemoval;
             public float HipsForwardBias;
+            /// <summary>How much of a look-UP's lever swing is removed when the head->neck lever is
+            /// re-attached. 0 = the old rigid re-attachment. See BasisNeckCueCore.</summary>
+            public float NeckExtensionDamp;
             public float TorsoYawDeadzoneDeg;
             public float TorsoYawBlendSpeed;
 
@@ -145,6 +171,10 @@ namespace Basis.IK
         {
             public float3 HeadBaselineXZ;
             public byte HeadBaselineInitialized;
+            /// <summary>The user's OWN resting head height, used as the reference the crouch allowance
+            /// measures its drop against. Rise-only and capped at the avatar's standing head height — see
+            /// where it is maintained in the job for why it is not simply the T-pose head.</summary>
+            public float StandingHeadRefY;
 
             public byte TorsoYawInitialized;
             public float TorsoYawAnchorDeg;
@@ -195,15 +225,24 @@ namespace Basis.IK
                 head.OutgoingPosition = headPos;
                 ApplyWorldAndLastBurst(ref head, in P.ParentMatrix, in P.ParentRotation);
 
-                ComposePosition(in P.NeckTargetPos, in P.NeckTargetRot, in P.NeckScaledOffset, out float3 neckPos0);
+                float3 rawUp = math.mul(P.ParentMatrix, new float4(0f, 1f, 0f, 0f)).xyz;
+                NormalizeSafeWithFallback(in rawUp, new float3(0f, 1f, 0f), out float3 worldUp);
+
+                // The neck is the Head->Neck rotational lock: head position + head rotation * the T-pose
+                // head->neck lever. That is the SAME estimate BasisEerieMovement's ComputeNeckCue makes, and
+                // it carries the same defect -- swinging the lever by the whole gaze assumes the nod pivoted
+                // at the neck bone, which a look-UP does not. Left alone it walks this neck (and with it the
+                // chest/spine chord strung between neck and hips, and the chest IK target riding on it) out
+                // in front of the body and up. Same core, so the two estimates cannot drift apart. Look-down
+                // and pure yaw are bit-identical.
+                float3 neckPos0 = BasisNeckCueCore.Solve(P.NeckTargetPos, P.NeckTargetRot, P.NeckScaledOffset,
+                    worldUp, P.NeckExtensionDamp);
                 neck.OutgoingPosition = neckPos0;
                 ApplyWorldAndLastBurst(ref neck, in P.ParentMatrix, in P.ParentRotation);
 
                 float3 neckPosWorld = neck.OutgoingPosition;
 
                 // 2) HIPS: build from neck and preserved span
-                float3 rawUp = math.mul(P.ParentMatrix, new float4(0f, 1f, 0f, 0f)).xyz;
-                NormalizeSafeWithFallback(in rawUp, new float3(0f, 1f, 0f), out float3 worldUp);
 
                 ExtractYawBurst(in eyeRot, out quaternion headYawFromEye);
 
@@ -235,8 +274,65 @@ namespace Basis.IK
                 // Crouch depth for the stance radius, measured off the HEAD (vertical drop is a head
                 // quantity) and lifted into the tracked frame exactly as ComputeHipsPosition does --
                 // otherwise a play-space lift reads as a permanent phantom crouch.
-                float stanceHeadDrop = math.max(0f, (P.StandingHeadLocalY + P.TrackingLiftY) - headPosWorld.y);
-                float3 desiredHipsXZ = ComputeRealisticHipsXZBurst(ref s, eyePosDevice, dt, P.StandingHeadLocalY, stanceHeadDrop, in torsoYawTarget, P.LeftFootPos, P.RightFootPos, P.LeftFootTracked != 0, P.RightFootTracked != 0, out float3 supportXZ);
+                //
+                // The reference is the user's OWN resting head height, NOT the avatar's T-pose head. Measuring
+                // straight against the T-pose conflated two different things: a live squat (transient, and the
+                // reason CrouchLeanAllowanceFrac exists) and a CONSTANT gap between the tracked head and the
+                // avatar's authored one -- eye-height calibration drift, or a developer sat in a real chair.
+                // The constant gap is not a crouch, but it was read as one and inflated the stance radius by
+                // 0.70x it FOREVER: a 45 cm sit turns a 19 cm radius into ~51 cm, the support base then never
+                // concludes the user has stepped, and the pelvis is free to park anywhere inside half a metre.
+                // Rise-only, and capped at the calibrated standing height: it climbs to wherever the head
+                // actually rests (absorbing any constant offset within a frame) but can never exceed the T-pose
+                // head, so a correctly-calibrated standing user is bit-identical to before and a real squat
+                // still reads its full depth. Seeded with the baseline, so a height/scale change re-seeds it.
+                float standingHeadLifted = P.StandingHeadLocalY + P.TrackingLiftY;
+                float headRestCandidate = math.min(headPosWorld.y, standingHeadLifted);
+                s.StandingHeadRefY = s.HeadBaselineInitialized == 0
+                    ? headRestCandidate
+                    : math.max(s.StandingHeadRefY, headRestCandidate);
+                float stanceHeadDrop = math.max(0f, s.StandingHeadRefY - headPosWorld.y);
+                // ⭐ THE EYE IS YAW-INVARIANT BUT NOT PITCH-INVARIANT, AND THE LEASH ONLY NEEDED THE FIRST.
+                // The leash exists to estimate WHERE THE USER IS STANDING, and it tracks the eye because every
+                // derived bone orbits the eye under view yaw. But a head does not pitch about itself: the HMD
+                // rides the neck's lever arm, so a look-up carries it ~8 cm BACKWARD and a look-down carries it
+                // further forward again -- with the player's feet welded to the floor. The follow law is fast by
+                // design (rate 2 + 250*dist/radius adopts ~2/3 of an 8 cm move in a single frame at 90 Hz), so
+                // the pelvis rode the gaze almost 1:1: look up, the pelvis walks backward out from under the
+                // player, the trunk is left leaning forward to reach a head that has not moved, and once the
+                // hips->head span passes the chain's reach the spine CCD projects the head onto its reach sphere
+                // and the head comes off the HMD entirely. That is the "big bend forwards, and the head is
+                // pulled away from the camera" report.
+                //
+                // So subtract the swing the gaze itself accounts for and leash what is left, which is the part
+                // that really was a step. BasisHeadPitchSwingCore already owns this model -- the desktop eye ADDS
+                // exactly this carry to a pinned eye, because there the HMD is not there to produce it. Same core,
+                // same constants, opposite direction.
+                float3 leashEyePos = eyePosDevice;
+                if (P.GazeSwingRemoval > 0f)
+                {
+                    float3 gazeFwd = math.mul(eyeRot, new float3(0f, 0f, 1f));
+                    float gazeHorizMag = math.sqrt(gazeFwd.x * gazeFwd.x + gazeFwd.z * gazeFwd.z);
+                    // POSITIVE = looking down, matching the core's documented convention.
+                    float gazePitchDeg = math.degrees(math.atan2(-gazeFwd.y, gazeHorizMag));
+                    YawDegrees(in headYawFromEye, out float gazeYawDeg);
+
+                    BasisHeadPitchSwingInput swing;
+                    swing.PitchDeg = gazePitchDeg;
+                    swing.YawDeg = gazeYawDeg;
+                    swing.EyeFromNeck = P.EyeFromHeadTpose;
+                    swing.Strength = P.GazeSwingRemoval;
+                    // 1, not the desktop 0.35: that fudge exists because BasisDesktopEye predicts the swing
+                    // off the NECK lever, where the raw geometry over-reports a look-up. Here the lever IS the
+                    // lock's own, so the rigid value is the self-consistent one and scaling it would put the
+                    // removal back out of step with the lock it is meant to cancel.
+                    swing.BackwardScale = 1f;
+                    BasisHeadPitchSwingCore.Solve(swing, out BasisHeadPitchSwingResult swingResult);
+                    // The core emits Vector3.zero on every degenerate/NaN path, so this is a no-op there.
+                    leashEyePos -= (float3)swingResult.Offset;
+                }
+
+                float3 desiredHipsXZ = ComputeRealisticHipsXZBurst(ref s, leashEyePos, dt, P.StandingHeadLocalY, stanceHeadDrop, in torsoYawTarget, P.LeftFootPos, P.RightFootPos, P.LeftFootTracked != 0, P.RightFootTracked != 0, out float3 supportXZ);
                 float3 hipsArm = math.mul(torsoYawTarget, P.HipsAnchorOffsetLocal);
                 desiredHipsXZ += new float3(hipsArm.x, 0f, hipsArm.z);
                 // The posture model's lean must measure the head's TRAVEL, not the avatar's authoring or the
@@ -417,9 +513,10 @@ namespace Basis.IK
         /// Anatomy-aware hips XZ. Two layers:
         ///   (1) Counterbalance: a leashed head-XZ baseline estimates the user's support base (where they are
         ///       standing). Hips sit at baseline + an axis-dependent fraction of the head's deviation: little of
-        ///       a FORWARD lean (a bend counter-balances — hips stay back and hold there) but most of a SIDEWAYS
-        ///       shift (a weight shift stays stacked over the feet), while stepping drags the base along and the
-        ///       hips follow.
+        ///       a FORWARD lean (a bend counter-balances — hips stay back) but most of a SIDEWAYS shift (a
+        ///       weight shift stays stacked over the feet), while stepping drags the base along and the hips
+        ///       follow. The base also settles onto the head over seconds, so the counterbalance is a response
+        ///       to a lean rather than a permanent offset — a posture you HOLD becomes where you are standing.
         ///   (2) Foot pendulum: if both feet are tracked, override with feet-midpoint + a small lean
         ///       toward the head — closer to a real inverted-pendulum stance. With roles on the feet the
         ///       support base is known outright, so no estimate is used.
@@ -439,18 +536,36 @@ namespace Basis.IK
             }
             else
             {
-                // The support base only moves when the user STEPS, so the discriminator is spatial, not
-                // temporal: a lean and a step are indistinguishable in head-XZ-over-time (both move the head
-                // and leave it there), but a lean cannot reach past a stance radius. The pull scales with the
-                // SQUARED exceedance so tracker jitter across the boundary cannot ratchet the base outward.
+                // ONE CONTINUOUS LAW. The support base tracks the head at a rate that rises smoothly with how
+                // far it has been left behind -- no threshold, no latch, no dead zone, no mode.
+                //
+                // Every previous form here was a SWITCH, and that is what made the pelvis read as stop-start:
+                // a deadband pull did nothing at all until the head crossed a stance radius, and the latch that
+                // replaced it did nothing until the same crossing and then dragged the base over in two frames.
+                // Both are bang-bang controllers. You stand still and the pelvis is inert; you drift one
+                // centimetre past an invisible line and it lunges. There is no set of thresholds that makes a
+                // switch feel continuous -- the discontinuity IS the design -- so the switch is gone.
+                //
+                // The distance term is what used to be the mode. Near zero the base is soft, so tracker noise
+                // and micro-motion do not drag it around; the further behind it falls the harder it is pulled,
+                // so a real step or a walk is followed instead of triggering a state change. Same behaviour at
+                // both ends as the two-mode version, and everything in between is now defined rather than
+                // being a cliff. `dist` is normalised by the stance radius so the whole law scales with the
+                // avatar, and so a crouch (which widens the radius) softens the follow exactly as it should.
+                //
+                // ⚠️ The leash no longer holds a counterbalance offset -- it cannot, and follow this closely.
+                // That is deliberate: the postural counterbalance is BasisTrunkCounterbalanceCore's job, it is
+                // derived from segment masses, and it is driven by the gaze-invariant neck cue rather than by
+                // "the head moved horizontally". The leash was a second, cruder copy of it that could not tell
+                // a bend from a walk. This one estimates only WHERE THE USER IS STANDING.
                 float safeDt = math.max(dt, 1e-6f);
                 // The BASE radius stays un-lifted on purpose (see TrackingLiftY: the lift moves the body, it
                 // does not resize it); only the crouch allowance uses the lifted drop, computed by the caller.
                 float radius = math.max(StanceRadiusFrac * standingHeadY + CrouchLeanAllowanceFrac * headDrop, 1e-3f);
 
-                float3 offset = headXZ - s.HeadBaselineXZ;
-                float over = math.max(0f, math.length(offset) - radius) / radius;
-                float alpha = 1f - math.exp(-HeadBaselinePullRate * over * over * safeDt);
+                float dist = math.length(headXZ - s.HeadBaselineXZ);
+                float rate = HeadBaselineFollowRateRest + HeadBaselineFollowRateGain * (dist / radius);
+                float alpha = 1f - math.exp(-rate * safeDt);
                 s.HeadBaselineXZ = math.lerp(s.HeadBaselineXZ, headXZ, alpha);
             }
 

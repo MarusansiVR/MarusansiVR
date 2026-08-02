@@ -26,6 +26,7 @@ namespace Basis.BasisUI
             public bool OwnsSprite;
             public string DateOfCreation;
             public string UniqueVersion;
+            public string ContentGroupId;
 
             public BasisLoadableBundle BasisLoadableBundle;
             public BasisBundleConnector BasisBundleConnector;
@@ -48,6 +49,33 @@ namespace Basis.BasisUI
         {
             if (string.IsNullOrEmpty(url)) return false;
             return _metaCache.ContainsKey(url);
+        }
+
+        /// <summary>
+        /// Drops one item's parsed connector so the next preload rebuilds it from disk. Used after
+        /// the cached bee behind a url is invalidated — the entry here still describes the OLD
+        /// bytes (name, thumbnail, creation date), so leaving it would keep showing the previous
+        /// version on the card even though the payload was refreshed.
+        /// </summary>
+        public static void RemoveMetaData(string url)
+        {
+            if (string.IsNullOrEmpty(url) || !_metaCache.TryGetValue(url, out CachedContent meta))
+            {
+                return;
+            }
+
+            // Same ownership rule as ClearMetaDataCache: only sprites this cache created are ours
+            // to destroy — an embedded item's sprite is owned by the addressable that supplied it.
+            if (meta != null && meta.OwnsSprite && meta.CachedSprite != null)
+            {
+                Texture2D texture = meta.CachedSprite.texture;
+                UnityEngine.Object.Destroy(meta.CachedSprite);
+                if (texture != null) UnityEngine.Object.Destroy(texture);
+                meta.CachedSprite = null;
+                meta.OwnsSprite = false;
+            }
+
+            _metaCache.Remove(url);
         }
 
         public static void ClearMetaDataCache()
@@ -169,6 +197,7 @@ namespace Basis.BasisUI
                 AssetBundleDescription = connector?.BasisBundleDescription?.AssetBundleDescription,
                 DateOfCreation = connector?.DateOfCreation,
                 UniqueVersion = connector?.UniqueVersion,
+                ContentGroupId = connector?.BasisBundleDescription?.ContentGroupId,
                 BasisBundleConnector = connector,
                 BasisLoadableBundle = wrapper.BasisLoadableBundle,
             };

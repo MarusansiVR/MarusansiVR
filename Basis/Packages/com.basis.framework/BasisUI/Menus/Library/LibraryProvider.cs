@@ -10,6 +10,7 @@ using System.Globalization;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using TMPro;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 using UnityEngine.UI;
@@ -335,10 +336,20 @@ namespace Basis.BasisUI
             var (onDisc, info) = await BasisLoadHandler.IsMetaDataOnDiscAsync(item.Url);
             if (onDisc)
             {
-                // CreateNewWrapperFromItem does not populate these fields so we update them
-                wrapper.BasisLoadableBundle.BasisRemoteBundleEncrypted = info.StoredRemote;
+                // CreateNewWrapperFromItem does not populate these fields so we update them.
+                // Cloned, never aliased: the tag assignment below would otherwise write straight
+                // into the meta cache's record — and BasisBeeManagement builds that record from a
+                // live BasisTrackedBundleWrapper's own instance, so the write would re-key a
+                // bundle somebody is currently wearing and strand its DeIncrement.
+                wrapper.BasisLoadableBundle.BasisRemoteBundleEncrypted = info.StoredRemote.Clone();
                 wrapper.BasisLoadableBundle.BasisLocalEncryptedBundle = info.StoredLocal;
                 wrapper.BasisLoadableBundle.BasisBundleConnector.UniqueVersion = info.UniqueVersion;
+                // Advertise the version we actually hold. StoredRemote carries whatever tag was
+                // REQUESTED when this was cached (empty for a library load), while CachedVersionTag
+                // is the validator observed for the bytes on disk. This bundle is what gets
+                // broadcast when the avatar is worn, so sending the requested one would tell every
+                // remote client "no version declared" and leave them pinned to their stale copy.
+                wrapper.BasisLoadableBundle.BasisRemoteBundleEncrypted.RemoteVersionTag = info.CachedVersionTag;
                 return wrapper;
             }
             else
@@ -451,15 +462,119 @@ namespace Basis.BasisUI
             return tab;
         }
 
-        private static void BuildItemsList(List<BasisDataStoreItemKeys.ItemKey> items, PanelTabPage tab)
+        private static void BuildItemsList(List<List<BasisDataStoreItemKeys.ItemKey>> stacks, PanelTabPage tab)
         {
             RectTransform container = tab.Descriptor.ContentParent;
             // List entries
-            for (int Index = 0; Index < items.Count; Index++)
+            for (int Index = 0; Index < stacks.Count; Index++)
             {
-                var item = items[Index];
-                CreateItemCard(item, container);
+                CreateItemCard(stacks[Index], container);
             }
+        }
+
+        /// <summary>
+        /// Groups entries that belong to the same piece of content into one stack, newest first.
+        /// Entries that cannot be grouped (embedded/addressable items, meta not cached yet) stay a
+        /// stack of one, so they behave exactly as before.
+        /// </summary>
+        private static List<List<BasisDataStoreItemKeys.ItemKey>> BuildVersionStacks(List<BasisDataStoreItemKeys.ItemKey> items)
+        {
+            List<List<BasisDataStoreItemKeys.ItemKey>> stacks = new(items.Count);
+            Dictionary<string, List<BasisDataStoreItemKeys.ItemKey>> byStackKey = new(StringComparer.Ordinal);
+
+            foreach (var item in items)
+            {
+                string stackKey = GetVersionStackKey(item);
+                if (string.IsNullOrEmpty(stackKey))
+                {
+                    stacks.Add(new List<BasisDataStoreItemKeys.ItemKey> { item });
+                    continue;
+                }
+
+                if (byStackKey.TryGetValue(stackKey, out var stack))
+                {
+                    stack.Add(item);
+                }
+                else
+                {
+                    stack = new List<BasisDataStoreItemKeys.ItemKey> { item };
+                    byStackKey[stackKey] = stack;
+                    stacks.Add(stack);
+                }
+            }
+
+            foreach (var stack in stacks)
+            {
+                if (stack.Count > 1)
+                {
+                    stack.Sort(CompareStackEntriesNewestFirst);
+                }
+            }
+
+            return stacks;
+        }
+
+        /// <summary>
+        /// Newest first: creation date decides when both entries have one. Content built before the
+        /// connector carried a date has none at all, and that is exactly the older content the
+        /// name-based grouping below exists for — so the version read out of the name breaks the tie
+        /// rather than leaving the stack in arbitrary order.
+        /// </summary>
+        private static int CompareStackEntriesNewestFirst(BasisDataStoreItemKeys.ItemKey left, BasisDataStoreItemKeys.ItemKey right)
+        {
+            int byDate = GetItemCreatedUtc(right).CompareTo(GetItemCreatedUtc(left));
+            if (byDate != 0)
+            {
+                return byDate;
+            }
+
+            return BasisContentNameVersion.CompareVersionDescending(GetItemDisplayName(left), GetItemDisplayName(right));
+        }
+
+        /// <summary>
+        /// What decides whether two library entries are versions of one another.
+        ///
+        /// <para>An authored ContentGroupId is definitive and always wins. Nothing built before that
+        /// field existed carries one though, and that content is exactly what creators have been
+        /// re-uploading by hand as "My Avatar", "My Avatar v2" — so those fall back to the display
+        /// name with any trailing version token stripped, which also stacks entries that share a
+        /// name outright.</para>
+        ///
+        /// <para>The two key spaces are prefixed so a group id can never collide with a name.</para>
+        /// </summary>
+        private static string GetVersionStackKey(BasisDataStoreItemKeys.ItemKey item)
+        {
+            if (item == null || item.EmbeddedSettings.IsEmbedded) return null;
+            if (!CachedMetaData.TryGetMeta(item.Url ?? string.Empty, out var meta)) return null;
+
+            if (!string.IsNullOrWhiteSpace(meta.ContentGroupId))
+            {
+                return "id:" + meta.ContentGroupId.Trim().ToLowerInvariant();
+            }
+
+            // Grouping by name is a heuristic over creator-chosen text, so it is scoped to one
+            // content type: an avatar and a prop that happen to share a name are not versions of
+            // each other, and stacking them would hide one behind the other.
+            string nameKey = BasisContentNameVersion.GroupKeyFromName(meta.Name);
+            return string.IsNullOrEmpty(nameKey) ? null : $"name:{item.Mode}:{nameKey}";
+        }
+
+        private static string GetItemDisplayName(BasisDataStoreItemKeys.ItemKey item)
+        {
+            if (item != null && CachedMetaData.TryGetMeta(item.Url ?? string.Empty, out var meta))
+            {
+                return meta.Name ?? string.Empty;
+            }
+            return string.Empty;
+        }
+
+        private static DateTime GetItemCreatedUtc(BasisDataStoreItemKeys.ItemKey item)
+        {
+            if (item != null && CachedMetaData.TryGetMeta(item.Url ?? string.Empty, out var meta) && meta.Created.HasValue)
+            {
+                return meta.Created.Value;
+            }
+            return DateTime.MinValue;
         }
 
         private static void ClearTabContent(RectTransform container)
@@ -642,7 +757,7 @@ namespace Basis.BasisUI
 
                     // Clear and rebuild the tab content
                     ClearTabContent(tab.Descriptor.ContentParent);
-                    BuildItemsList(data, tab);
+                    BuildItemsList(BuildVersionStacks(data), tab);
                     tab.Descriptor.ForceRebuild();
                 }
                 catch (Exception e)
@@ -731,10 +846,12 @@ namespace Basis.BasisUI
         #region CreateItemCard, ShowItemOverlay, ApplyMetaDataToButton
 
         /// <summary>
-        /// The item card displayed all around the library menu
+        /// The item card displayed all around the library menu. A stack with more than one entry
+        /// renders as a single card (newest upload in front) that opens a version picker on click.
         /// </summary>
-        private static void CreateItemCard(BasisDataStoreItemKeys.ItemKey item, RectTransform container)
+        private static void CreateItemCard(List<BasisDataStoreItemKeys.ItemKey> stack, RectTransform container)
         {
+            BasisDataStoreItemKeys.ItemKey item = stack[0];
             PanelButton buttonPanel = PanelButton.CreateNew(ButtonStyles.Prop, container);
             var urlKey = item.Url ?? string.Empty;
             var desc = buttonPanel.Descriptor;
@@ -747,16 +864,39 @@ namespace Basis.BasisUI
             switch(item.Mode)
             {
                 case BundledContentHolder.Mode.Avatar:
-                    buttonPanel.ButtonStyling.ShowIndicator(item.Url == BasisLocalPlayer.Instance.AvatarMetaData.BasisRemoteBundleEncrypted.RemoteBeeFileLocation);
+                    bool anyWorn = false;
+                    for (int Index = 0; Index < stack.Count; Index++)
+                    {
+                        if (stack[Index].Url == BasisLocalPlayer.Instance.AvatarMetaData.BasisRemoteBundleEncrypted.RemoteBeeFileLocation)
+                        {
+                            anyWorn = true;
+                            break;
+                        }
+                    }
+                    buttonPanel.ButtonStyling.ShowIndicator(anyWorn);
                 break;
                 case BundledContentHolder.Mode.World:
-                    int spawnItemCount = BasisRuntimeSpawnRegistry.CountIgnoreCase(item.Url);
+                    int spawnItemCount = 0;
+                    for (int Index = 0; Index < stack.Count; Index++)
+                    {
+                        spawnItemCount += BasisRuntimeSpawnRegistry.CountIgnoreCase(stack[Index].Url);
+                    }
                     buttonPanel.ButtonStyling.SetIndicatorStyle(Styling.UiStyleButton.SpawnedIndicatorStyle);
                     buttonPanel.ButtonStyling.ShowIndicator(spawnItemCount > 0);
                 break;
             }
 
-            if (item.PinnedSettings.IsPinned)
+            bool anyPinned = false;
+            for (int Index = 0; Index < stack.Count; Index++)
+            {
+                if (stack[Index].PinnedSettings.IsPinned)
+                {
+                    anyPinned = true;
+                    break;
+                }
+            }
+
+            if (anyPinned)
             {
                 // create an image for this card in top right with an offset of -35, -35
                 PanelImage pinnedIcon = PanelImage.CreateNew(buttonPanel.Descriptor);
@@ -804,6 +944,14 @@ namespace Basis.BasisUI
                 if (cachedMeta != null)
                 {
                     ApplyMetaDataToButton(buttonPanel, cachedMeta, urlKey);
+
+                    if (stack.Count > 1)
+                    {
+                        desc.SetDescription(string.Format(BasisLocalization.Get("library.stack.versions"), stack.Count));
+                        AddStackLayers(buttonPanel, stack);
+                        AddStackCountBadge(buttonPanel, stack.Count);
+                        desc.ForceRebuild();
+                    }
                 }
                 else
                 {
@@ -815,18 +963,126 @@ namespace Basis.BasisUI
                 }
             }
 
-            buttonPanel.OnClicked += () =>
+            buttonPanel.OnClicked += async () =>
             {
+                BasisDataStoreItemKeys.ItemKey chosen = item;
+                if (stack.Count > 1)
+                {
+                    chosen = await LibraryProviderDialogPickVersion.PromptUserToPickVersion(panel, stack);
+                    if (chosen == null) return;
+                }
+
                 try
                 {
-                    ShowItemOverlay(item);
+                    ShowItemOverlay(chosen);
                 }
                 catch (Exception ex)
                 {
-                    BasisDebug.LogError($"Item '{item?.Url}' failed to open and will be removed: {ex.Message}");
-                    _ = HandleBadItem(item);
+                    BasisDebug.LogError($"Item '{chosen?.Url}' failed to open and will be removed: {ex.Message}");
+                    _ = HandleBadItem(chosen);
                 }
             };
+        }
+
+        /// <summary>
+        /// Renders the stacked-collection look: up to two offset, slightly rotated image layers
+        /// behind the card's icon, like a pile of photos, using the older versions' thumbnails
+        /// when they are cached.
+        /// </summary>
+        private static void AddStackLayers(PanelButton buttonPanel, List<BasisDataStoreItemKeys.ItemKey> stack)
+        {
+            var desc = buttonPanel.Descriptor;
+            if (desc.IconBackground == null) return;
+            RectTransform iconRt = desc.IconBackground.transform as RectTransform;
+            if (iconRt == null || iconRt.parent == null) return;
+
+            Sprite faceSprite = null;
+            if (CachedMetaData.TryGetMeta(stack[0].Url ?? string.Empty, out var faceMeta))
+            {
+                faceSprite = CachedMetaData.CreateSpriteFromMetaData(faceMeta);
+            }
+
+            int layers = Mathf.Min(stack.Count - 1, 2);
+            for (int Index = layers; Index >= 1; Index--)
+            {
+                Sprite layerSprite = null;
+                if (CachedMetaData.TryGetMeta(stack[Index].Url ?? string.Empty, out var layerMeta))
+                {
+                    layerSprite = CachedMetaData.CreateSpriteFromMetaData(layerMeta);
+                }
+                if (layerSprite == null)
+                {
+                    layerSprite = faceSprite;
+                }
+
+                GameObject layerGo = new GameObject($"Stack Layer {Index}", typeof(RectTransform));
+                RectTransform rt = (RectTransform)layerGo.transform;
+                rt.SetParent(iconRt.parent, false);
+                rt.anchorMin = iconRt.anchorMin;
+                rt.anchorMax = iconRt.anchorMax;
+                rt.pivot = iconRt.pivot;
+                rt.anchoredPosition = iconRt.anchoredPosition + new Vector2(9f * Index, 7f * Index);
+                rt.sizeDelta = iconRt.sizeDelta;
+                rt.localRotation = Quaternion.Euler(0f, 0f, (Index % 2 == 0 ? -3f : 3f) * Index);
+                rt.localScale = Vector3.one * (1f - 0.05f * Index);
+
+                Image layerImage = layerGo.AddComponent<Image>();
+                layerImage.sprite = layerSprite;
+                float shade = 1f - 0.22f * Index;
+                layerImage.color = new Color(shade, shade, shade, 1f);
+                layerImage.raycastTarget = false;
+
+                LayoutElement layoutElement = layerGo.AddComponent<LayoutElement>();
+                layoutElement.ignoreLayout = true;
+
+                rt.SetSiblingIndex(iconRt.GetSiblingIndex());
+            }
+        }
+
+        /// <summary>
+        /// Small count badge in the card's top-left corner so a stack reads as "x3" at a glance.
+        /// Copies the card title's TMP font settings so it matches the UI style.
+        /// </summary>
+        private static void AddStackCountBadge(PanelButton buttonPanel, int count)
+        {
+            var desc = buttonPanel.Descriptor;
+
+            GameObject badgeGo = new GameObject("Stack Count", typeof(RectTransform));
+            RectTransform rt = (RectTransform)badgeGo.transform;
+            rt.SetParent(desc.rectTransform, false);
+            rt.anchorMin = new Vector2(0, 1);
+            rt.anchorMax = new Vector2(0, 1);
+            rt.pivot = new Vector2(0.5f, 0.5f);
+            rt.anchoredPosition = new Vector2(45, -35);
+            rt.sizeDelta = new Vector2(64, 42);
+
+            Image background = badgeGo.AddComponent<Image>();
+            background.color = new Color(0f, 0f, 0f, 0.6f);
+            background.raycastTarget = false;
+
+            LayoutElement layoutElement = badgeGo.AddComponent<LayoutElement>();
+            layoutElement.ignoreLayout = true;
+
+            GameObject textGo = new GameObject("Count", typeof(RectTransform));
+            RectTransform textRt = (RectTransform)textGo.transform;
+            textRt.SetParent(rt, false);
+            textRt.anchorMin = Vector2.zero;
+            textRt.anchorMax = Vector2.one;
+            textRt.offsetMin = Vector2.zero;
+            textRt.offsetMax = Vector2.zero;
+
+            TextMeshProUGUI label = textGo.AddComponent<TextMeshProUGUI>();
+            if (desc.TitleLabel != null)
+            {
+                label.font = desc.TitleLabel.font;
+                label.fontSharedMaterial = desc.TitleLabel.fontSharedMaterial;
+                label.color = desc.TitleLabel.color;
+            }
+            label.text = $"x{count}";
+            label.fontSize = 26;
+            label.alignment = TextAlignmentOptions.Center;
+            label.raycastTarget = false;
+            label.richText = false;
         }
 
         private static BasisDataStoreItemKeys.ItemKey _activeItem;
@@ -863,7 +1119,7 @@ namespace Basis.BasisUI
         {
             #region ITEM OVERLAY SETUP
 
-            Vector2 overlaySize = new Vector2(1200, 960);
+            Vector2 overlaySize = new Vector2(1200, 995);
 
             // grab the content from the cache
             CachedMetaData.CachedContent metadata;
@@ -1048,13 +1304,12 @@ namespace Basis.BasisUI
             else
             {
                 string[] platforms = metadata.BasisBundleConnector.BasisBundleGenerated.Select(pair => pair.Platform).ToArray();
-                string supported_platforms = string.Join(" | ", platforms);
-                platformIconsTextField.Descriptor.SetDescription($"{supported_platforms}");
 
                 foreach (string platform in platforms)
                 {
                     PanelImage panelImage = PanelImage.CreateNew(PanelImage.ImageStyles.SimpleSquare, platformIconsTextField.Descriptor.ContentParent);
                     panelImage.SetSize(new Vector2(80, 80));
+                    panelImage.Descriptor.SetTooltip(UserListProvider.GetPlatformLabel(platform));
 
                     switch (platform)
                     {
@@ -1078,6 +1333,12 @@ namespace Basis.BasisUI
                         case "iOS":
                             panelImage.SetIcon(AddressableAssets.Sprites.PlatformMobileiOS);
                             break;
+
+                        case BasisBundleConnector.GenericPlatform:
+                            // The platform-agnostic glTF section — it carries a .glb rather than a
+                            // per-platform AssetBundle, so it loads anywhere and has no vendor logo.
+                            panelImage.SetIcon(AddressableAssets.Sprites.PlatformGeneric);
+                            break;
                     }
                 }
             }
@@ -1085,84 +1346,17 @@ namespace Basis.BasisUI
 
             #endregion
 
-            // lets create a grid to put the items below in
-            PanelTabPage grid = PanelTabPage.CreateNew(scrollablePage.Descriptor.ContentParent);
-            PanelElementDescriptor scrollViewGridDescriptor = PanelElementDescriptor.CreateNew(PanelElementDescriptor.ElementStyles.ScrollViewGridLibrary, grid.Descriptor.ContentParent);
-            grid.Descriptor.ContentParent = scrollViewGridDescriptor.ContentParent;
-            grid.Descriptor.SetHeight(150);
+            #region ITEM DETAILS
 
-            #region POLYGON COUNT
-
-            long polygonCount = 0;
-
-            if (item.EmbeddedSettings.IsEmbedded && item.EmbeddedSettings.SourceType == BasisDataStoreItemKeys.EmbeddedSource.Addressable)
+            PanelButton detailsPanelButton = PanelButton.CreateNew(ButtonStyles.StandardButton, scrollablePage.Descriptor.ContentParent);
+            detailsPanelButton.Descriptor.SetTitle(string.Format(BasisLocalization.Get("library.details"), item.Mode));
+            detailsPanelButton.Descriptor.SetTooltip(BasisLocalization.Get("library.details.tooltip"));
+            detailsPanelButton.Descriptor.SetHeight(130);
+            detailsPanelButton.Descriptor.SetWidth(400);
+            detailsPanelButton.OnClicked += async () =>
             {
-                polygonCount = 0;
-            }
-            else
-            {
-                polygonCount = metadata.BasisBundleConnector.MetaData.TrianglesCount;
-            }
-
-            // creation date and time
-            PanelTextField polygonTextField = PanelTextField.CreateNew(TextFieldStyles.EntryVertical, grid.Descriptor.ContentParent);//scrollablePage.Descriptor.ContentParent);
-            polygonTextField._inputField.gameObject.SetActive(false); // disable the text input field box
-            polygonTextField.Descriptor.SetTitle(BasisLocalization.Get("library.triangleCount"));
-            polygonTextField.Descriptor.SetIcon(AddressableAssets.Sprites.Polygons);
-            polygonTextField.Descriptor.SetDescription($"{polygonCount}");
-
-            polygonTextField.Descriptor.SetHeight(50);
-            polygonTextField.Descriptor.SetWidth(400);
-
-            #endregion
-
-            #region MATERIAL COUNT
-
-            long materialCount = 0;
-
-            if (item.EmbeddedSettings.IsEmbedded && item.EmbeddedSettings.SourceType == BasisDataStoreItemKeys.EmbeddedSource.Addressable)
-            {
-                materialCount = 0;
-            }
-            else
-            {
-                materialCount = metadata.BasisBundleConnector.MetaData.MaterialCount;
-            }
-
-            // creation date and time
-            PanelTextField materialTextField = PanelTextField.CreateNew(TextFieldStyles.EntryVertical, grid.Descriptor.ContentParent);//scrollablePage.Descriptor.ContentParent);
-            materialTextField._inputField.gameObject.SetActive(false); // disable the text input field box
-            materialTextField.Descriptor.SetTitle(BasisLocalization.Get("library.materialCount"));
-            materialTextField.Descriptor.SetIcon(AddressableAssets.Sprites.Materials);
-            materialTextField.Descriptor.SetDescription($"{materialCount}");
-
-            materialTextField.Descriptor.SetHeight(50);
-            materialTextField.Descriptor.SetWidth(400);
-
-            #endregion
-
-            #region BONES COUNT
-
-            long boneCount = 0;
-
-            if (item.EmbeddedSettings.IsEmbedded && item.EmbeddedSettings.SourceType == BasisDataStoreItemKeys.EmbeddedSource.Addressable)
-            {
-                boneCount = 0;
-            }
-            else
-            {
-                boneCount = metadata.BasisBundleConnector.MetaData.BonesCount;
-            }
-
-            // creation date and time
-            PanelTextField bonesTextField = PanelTextField.CreateNew(TextFieldStyles.EntryVertical, grid.Descriptor.ContentParent);//scrollablePage.Descriptor.ContentParent);
-            bonesTextField._inputField.gameObject.SetActive(false); // disable the text input field box
-            bonesTextField.Descriptor.SetTitle(BasisLocalization.Get("library.bonesCount"));
-            bonesTextField.Descriptor.SetIcon(AddressableAssets.Sprites.Bones);
-            bonesTextField.Descriptor.SetDescription($"{boneCount}");
-
-            bonesTextField.Descriptor.SetHeight(50);
-            bonesTextField.Descriptor.SetWidth(400);
+                await LibraryProviderDialogItemDetails.ShowItemDetails(panel, item, metadata);
+            };
 
             #endregion
 
@@ -1404,7 +1598,7 @@ namespace Basis.BasisUI
 
             PanelButton deletePanelButton = PanelButton.CreateNew(ButtonStyles.CancelButton, actionsPanel.TabButtonParent); //ButtonStyles.Cancel
             deletePanelButton.Descriptor.SetTitle(BasisLocalization.Get("library.delete"));
-            deletePanelButton.Descriptor.SetWidth(220);
+            deletePanelButton.Descriptor.SetWidth(200);
             deletePanelButton.Descriptor.SetHeight(60);
 
             // Embedded items can never be deleted. Server-provided items CAN — the
@@ -1452,10 +1646,55 @@ namespace Basis.BasisUI
                 }
             };
 
+            // Check-for-update button — the user-driven half of static-url cache invalidation.
+            // Content cached by url stays cached forever no matter what the host now serves, so
+            // this asks the host whether the bytes changed and evicts the stale copy if they did.
+            PanelButton updatePanelButton = PanelButton.CreateNew(ButtonStyles.StandardButton, actionsPanel.TabButtonParent);
+            updatePanelButton.Descriptor.SetTitle(BasisLocalization.Get("library.checkForUpdate"));
+            updatePanelButton.Descriptor.SetWidth(200);
+            updatePanelButton.Descriptor.SetHeight(60);
+
+            bool updateCheckSupported = LibraryProviderDialogCheckForUpdate.IsSupported(item);
+            updatePanelButton.SetInteractable(
+                updateCheckSupported,
+                !updateCheckSupported
+                    ? (item.EmbeddedSettings.IsEmbedded
+                        ? BasisLocalization.Get("library.disabled.embedded")
+                        : BasisLocalization.Get("library.disabled.local"))
+                    : null);
+
+            updatePanelButton.OnClicked += async () =>
+            {
+                if (!updateCheckSupported) return;
+                if (existingItemDialog.IsBusy) return;
+                existingItemDialog.IsBusy = true;
+
+                bool refreshed = false;
+                try
+                {
+                    refreshed = await LibraryProviderDialogCheckForUpdate.PromptUserForUpdateCheck(panel, item, description);
+                }
+                catch (Exception ex)
+                {
+                    BasisDebug.LogError(ex);
+                }
+
+                if (refreshed)
+                {
+                    // The card behind this dialog was built from the now-discarded metadata.
+                    existingItemDialog.CloseWithResult(null);
+                    await RefreshCurrentTab();
+                }
+                else
+                {
+                    existingItemDialog.IsBusy = false;
+                }
+            };
+
             // Share button - only enabled when connected to a server
             PanelButton sharePanelButton = PanelButton.CreateNew(ButtonStyles.StandardButton, actionsPanel.TabButtonParent);
             sharePanelButton.Descriptor.SetTitle(BasisLocalization.Get("library.share"));
-            sharePanelButton.Descriptor.SetWidth(150);
+            sharePanelButton.Descriptor.SetWidth(140);
             sharePanelButton.Descriptor.SetHeight(60);
             sharePanelButton.SetInteractable(
                 BasisNetworkConnection.LocalPlayerIsConnected && !isLocalItem,
@@ -1520,7 +1759,7 @@ namespace Basis.BasisUI
                     break;
             }
 
-            loadPanelButton.Descriptor.SetWidth(620);
+            loadPanelButton.Descriptor.SetWidth(450);
             loadPanelButton.Descriptor.SetHeight(60);
             // on load of a item we do these actions
             loadPanelButton.OnClicked += async () =>
